@@ -12,6 +12,7 @@ mod sessions;
 mod tokens;
 
 use crate::app::App;
+use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -262,16 +263,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     if w < MIN_WIDTH || h < MIN_HEIGHT {
         let msg = vec![
             Line::from(Span::styled(
-                "Terminal size too small:",
+                t("term.too_small"),
                 Style::default().fg(theme.main_fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(vec![
-                Span::styled("Width = ", Style::default().fg(theme.main_fg)),
+                Span::styled(format!("{} ", t("term.width")), Style::default().fg(theme.main_fg)),
                 Span::styled(
                     w.to_string(),
                     Style::default().fg(if w < MIN_WIDTH { Color::Red } else { Color::Green }),
                 ),
-                Span::styled(" Height = ", Style::default().fg(theme.main_fg)),
+                Span::styled(format!(" {} ", t("term.height")), Style::default().fg(theme.main_fg)),
                 Span::styled(
                     h.to_string(),
                     Style::default().fg(if h < MIN_HEIGHT { Color::Red } else { Color::Green }),
@@ -279,11 +280,11 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "Needed for current config:",
+                t("term.needed"),
                 Style::default().fg(theme.main_fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                format!("Width = {} Height = {}", MIN_WIDTH, MIN_HEIGHT),
+                format!("{} {}  {} {}", t("term.width"), MIN_WIDTH, t("term.height"), MIN_HEIGHT),
                 Style::default().fg(theme.main_fg),
             )),
         ];

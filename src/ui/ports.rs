@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -38,9 +39,11 @@ pub(crate) fn draw_ports_panel(f: &mut Frame, app: &App, area: Rect, theme: &The
     let proc_grad = make_gradient(theme.proc_grad.start, theme.proc_grad.mid, theme.proc_grad.end);
 
     let header_style = Style::default().fg(theme.main_fg).add_modifier(Modifier::BOLD);
+    let port_label = t("ports.port");
+    let session_label = t("ports.session");
     let mut lines = vec![Line::from(vec![
-        Span::styled(" PORT  ", header_style),
-        Span::styled("SESSION", header_style),
+        Span::styled(format!(" {}  ", port_label), header_style),
+        Span::styled(session_label, header_style),
     ])];
     for (port, proj, sid) in &all_ports {
         let conflict = port_counts.get(port).copied().unwrap_or(0) > 1;
@@ -50,35 +53,38 @@ pub(crate) fn draw_ports_panel(f: &mut Frame, app: &App, area: Rect, theme: &The
             theme.proc_misc
         };
         let warn = if conflict { " ⚠" } else { "" };
-        let session_label = format!("{} {}{}", proj, sid, warn);
+        let session_label_text = format!("{} {}{}", proj, sid, warn);
         lines.push(Line::from(vec![
             Span::styled(format!(" :{:<5}", port), Style::default().fg(color)),
-            Span::styled(session_label, Style::default().fg(theme.main_fg)),
+            Span::styled(session_label_text, Style::default().fg(theme.main_fg)),
         ]));
     }
 
     // Orphan ports: processes whose parent session has ended but port is still open
     let orphan_color = grad_at(&proc_grad, 100.0);
+    let orphan_label = t("ports.orphan");
     for orphan in &app.orphan_ports {
-        let session_label = format!("{} ⚠orphan", orphan.project_name);
+        let session_label_text = format!("{} ⚠{}", orphan.project_name, orphan_label);
         lines.push(Line::from(vec![
             Span::styled(format!(" :{:<5}", orphan.port), Style::default().fg(orphan_color)),
-            Span::styled(session_label, Style::default().fg(orphan_color)),
+            Span::styled(session_label_text, Style::default().fg(orphan_color)),
         ]));
     }
 
     let has_orphans = !app.orphan_ports.is_empty();
 
+    let no_open_ports = t("ports.no_open_ports");
     if lines.len() <= 1 {
         lines.push(Line::from(Span::styled(
-            " no open ports",
+            format!(" {}", no_open_ports),
             Style::default().fg(theme.inactive_fg),
         )));
     }
 
+    let kill_orphans = t("ports.kill_orphans");
     if has_orphans {
         lines.push(Line::from(Span::styled(
-            " X to kill orphans",
+            format!(" {}", kill_orphans),
             Style::default().fg(theme.inactive_fg),
         )));
     }

@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::model::{AgentSession, FileOp};
+use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -67,11 +68,11 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
     // Responsive widths — all 9 core columns always visible, widths adapt
     let project_w: u16 = if w >= 120 { 14 } else if w >= 100 { 10 } else { 7 };
     let session_w: u16 = if w >= 110 { 9 } else { 5 };
-    let session_label = if w >= 110 { "Session" } else { "Sess" };
+    let session_label = if w >= 110 { t("col.session") } else { t("col.sess") };
     let status_w: u16 = if w >= 100 { 8 } else { 6 };
     let model_w: u16 = if w >= 110 { 13 } else { 10 };
     let context_w: u16 = if w >= 100 { 7 } else { 5 };
-    let context_label = if w >= 100 { "Context" } else { "Ctx" };
+    let context_label = if w >= 100 { t("col.context") } else { t("col.ctx") };
     let tokens_w: u16 = if w >= 100 { 7 } else { 5 };
 
     let visible = app.visible_indices();
@@ -89,14 +90,14 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
             }
         };
 
-        let (status_icon, status_color) = match &session.status {
-            crate::model::SessionStatus::Thinking => ("◉ Think", theme.proc_misc),
-            crate::model::SessionStatus::Executing => ("● Exec", theme.hi_fg),
+        let (status_icon_str, status_color) = match &session.status {
+            crate::model::SessionStatus::Thinking => (t("sess.think"), theme.proc_misc),
+            crate::model::SessionStatus::Executing => (t("sess.exec"), theme.hi_fg),
             crate::model::SessionStatus::Waiting => {
-                ("◌ Wait", grad_at(&proc_grad, 50.0))
+                (t("sess.wait"), grad_at(&proc_grad, 50.0))
             }
-            crate::model::SessionStatus::RateLimited => ("⏳ Rate", theme.status_fg),
-            crate::model::SessionStatus::Done => ("✓ Done", theme.inactive_fg),
+            crate::model::SessionStatus::RateLimited => (t("sess.rate"), theme.status_fg),
+            crate::model::SessionStatus::Done => (t("sess.done"), theme.inactive_fg),
         };
 
         let is_1m = session.total_tokens() > 200_000 || session.model.contains("[1m]");
@@ -145,7 +146,7 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
             )),
             Cell::from(Span::styled(summary_col, Style::default().fg(theme.main_fg))),
             Cell::from(Span::styled(
-                truncate_str(status_icon, status_w as usize),
+                truncate_str(&status_icon_str, status_w as usize),
                 Style::default().fg(status_color),
             )),
             Cell::from(Span::styled(
@@ -237,25 +238,25 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
         .add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
         Cell::from(""),
-        Cell::from(Span::styled("AI", header_style)),
+        Cell::from(Span::styled(t("col.ai"), header_style)),
     ];
     if show_pid {
-        header_cells.push(Cell::from(Span::styled("Pid", header_style)));
+        header_cells.push(Cell::from(Span::styled(t("col.pid"), header_style)));
     }
     header_cells.extend([
-        Cell::from(Span::styled("Project", header_style)),
+        Cell::from(Span::styled(t("col.project"), header_style)),
         Cell::from(Span::styled(session_label, header_style)),
-        Cell::from(Span::styled("Summary", header_style)),
-        Cell::from(Span::styled("Status", header_style)),
-        Cell::from(Span::styled("Model", header_style)),
+        Cell::from(Span::styled(t("col.summary"), header_style)),
+        Cell::from(Span::styled(t("col.status"), header_style)),
+        Cell::from(Span::styled(t("col.model"), header_style)),
         Cell::from(Span::styled(context_label, header_style)),
-        Cell::from(Span::styled("Tokens", header_style)),
+        Cell::from(Span::styled(t("col.tokens"), header_style)),
     ]);
     if show_memory {
-        header_cells.push(Cell::from(Span::styled("Memory", header_style)));
+        header_cells.push(Cell::from(Span::styled(t("col.memory"), header_style)));
     }
     if show_turn {
-        header_cells.push(Cell::from(Span::styled("Turn", header_style)));
+        header_cells.push(Cell::from(Span::styled(t("col.turn"), header_style)));
     }
     let header = Row::new(header_cells).height(1);
 
@@ -429,13 +430,13 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
         {
             let mut lines = Vec::new();
             lines.push(Line::from(Span::styled(
-                format!(" SESSION (►{} · {})", &session.session_id, &session.cwd),
+                format!(" {} (►{} · {})", t("detail.session").as_str(), &session.session_id, &session.cwd),
                 Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
             )));
             if !session.initial_prompt.is_empty() {
                 let max_w = (header_area.width as usize).saturating_sub(9);
                 lines.push(Line::from(vec![
-                    Span::styled("  task ", Style::default().fg(theme.graph_text)),
+                    Span::styled(format!("  {} ", t("detail.task").as_str()), Style::default().fg(theme.graph_text)),
                     Span::styled(
                         truncate_str(&session.initial_prompt, max_w),
                         Style::default().fg(theme.main_fg),
@@ -492,7 +493,7 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
                 let children_area = body_chunks[0];
                 let mut lines = Vec::new();
                 lines.push(Line::from(Span::styled(
-                    " CHILDREN",
+                    format!(" {}", t("detail.children").as_str()),
                     Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
                 )));
                 for child in &session.children {
@@ -533,7 +534,7 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
 
                 let mut lines = Vec::new();
                 lines.push(Line::from(Span::styled(
-                    " SUBAGENTS",
+                    format!(" {}", t("detail.subagents").as_str()),
                     Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
                 )));
 
@@ -612,8 +613,8 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
             if session.agent_cli == "claude" {
                 footer_lines.push(Line::from(Span::styled(
                     format!(
-                        " MEM {} files · {}/200 lines",
-                        session.mem_file_count, session.mem_line_count
+                        " {} {} · {}/200 · 200 lines",
+                        t("detail.mem").as_str(), session.mem_file_count, session.mem_line_count
                     ),
                     Style::default().fg(mem_color),
                 )));
@@ -625,7 +626,7 @@ pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &
                     .collect();
                 let spark_w = (detail_footer.width as usize).saturating_sub(16).clamp(4, 40);
                 let mut ctx_spans = vec![
-                    Span::styled(" CTX ", Style::default().fg(theme.graph_text)),
+                    Span::styled(format!(" {} ", t("detail.ctx").as_str()), Style::default().fg(theme.graph_text)),
                 ];
                 ctx_spans.extend(super::braille_sparkline(&normalized, spark_w, &cpu_grad, theme.graph_text));
                 if session.compaction_count > 0 {
@@ -665,7 +666,7 @@ fn draw_file_audit(f: &mut Frame, session: &AgentSession, area: Rect, theme: &Th
 
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!(" FILE AUDIT ({} accesses, {} unique files)", total_count, unique_count),
+        format!(" {} ({} accesses, {} unique files)", t("detail.file_audit").as_str(), total_count, unique_count),
         Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
     )));
 
@@ -852,7 +853,8 @@ fn draw_timeline(
     lines.push(Line::from(vec![
         Span::styled(
             format!(
-                " TIMELINE ({} calls, {}{})",
+                " {} ({} calls, {}{})",
+                t("detail.timeline").as_str(),
                 tool_calls.len(),
                 fmt_duration(total_duration),
                 running_note,

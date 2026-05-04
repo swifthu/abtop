@@ -1,3 +1,4 @@
+mod locale;
 mod app;
 mod collector;
 mod config;

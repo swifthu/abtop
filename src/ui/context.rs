@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -34,16 +35,19 @@ pub(crate) fn draw_context_panel(f: &mut Frame, app: &App, area: Rect, theme: &T
             .filter(|s| s.status.is_active())
             .count();
 
+        let rate_label = t("context.rate");
+        let total_label = t("context.total");
+        let active_label = t("context.active");
         let line = Line::from(vec![
-            Span::styled(" Rate ", Style::default().fg(theme.graph_text)),
+            Span::styled(format!(" {} ", rate_label), Style::default().fg(theme.graph_text)),
             Span::styled(
                 format!("{}/min", fmt_tokens(tokens_per_min as u64)),
                 Style::default().fg(grad_at(&cpu_grad, 50.0)),
             ),
-            Span::styled("  Total ", Style::default().fg(theme.graph_text)),
+            Span::styled(format!("  {} ", total_label), Style::default().fg(theme.graph_text)),
             Span::styled(fmt_tokens(total), Style::default().fg(theme.main_fg)),
             Span::styled(
-                format!("  {} active", active),
+                format!("  {} {}", active, active_label),
                 Style::default().fg(theme.proc_misc),
             ),
         ]);
@@ -76,8 +80,9 @@ fn draw_context_sparkline(f: &mut Frame, app: &App, area: Rect, cpu_grad: &[Colo
     let tokens_per_min: f64 = rates.iter().rev().take(ticks_per_min).sum();
     let current_pct = normalized.last().copied().unwrap_or(0.0) * 100.0;
     let pct_color = grad_at(cpu_grad, current_pct);
+    let token_rate_label = t("context.token_rate");
     lines.push(Line::from(vec![
-        Span::styled(" Token Rate", Style::default().fg(theme.graph_text)),
+        Span::styled(token_rate_label, Style::default().fg(theme.graph_text)),
         Span::styled(
             format!("  {}/min", fmt_tokens(tokens_per_min as u64)),
             Style::default().fg(pct_color),
@@ -95,9 +100,10 @@ fn draw_context_sparkline(f: &mut Frame, app: &App, area: Rect, cpu_grad: &[Colo
 
     // Summary line: total tokens
     let total_tokens: u64 = app.sessions.iter().map(|s| s.total_tokens()).sum();
+    let total_label = t("context.total");
     lines.push(Line::from(vec![
         Span::styled(format!(" {}", fmt_tokens(total_tokens)), Style::default().fg(theme.main_fg)),
-        Span::styled(" total", Style::default().fg(theme.graph_text)),
+        Span::styled(format!(" {}", total_label), Style::default().fg(theme.graph_text)),
     ]));
 
     f.render_widget(Paragraph::new(lines), area);
@@ -110,6 +116,10 @@ fn draw_context_bars(f: &mut Frame, app: &App, area: Rect, cpu_grad: &[Color; 10
     let bar_width = (area.width as usize).saturating_sub(30).clamp(4, 20);
 
     let mut rows = Vec::new();
+
+    let project_label = t("context.project");
+    let context_label = t("context.context");
+    let window_label = t("context.window");
 
     for session in &app.sessions {
         let raw_pct = session.context_percent;
@@ -146,9 +156,10 @@ fn draw_context_bars(f: &mut Frame, app: &App, area: Rect, cpu_grad: &[Color; 10
     }
 
     if app.sessions.is_empty() {
+        let no_active = t("context.no_active_sessions");
         rows.push(Row::new(vec![
             Cell::from(Span::styled(
-                "no active sessions",
+                no_active,
                 Style::default().fg(theme.inactive_fg),
             )),
             Cell::from(""),
@@ -157,9 +168,9 @@ fn draw_context_bars(f: &mut Frame, app: &App, area: Rect, cpu_grad: &[Color; 10
     }
 
     let header = Row::new(vec![
-        Cell::from(Span::styled("Project", header_style)),
-        Cell::from(Span::styled("Context", header_style)),
-        Cell::from(Span::styled("Window", header_style)),
+        Cell::from(Span::styled(project_label, header_style)),
+        Cell::from(Span::styled(context_label, header_style)),
+        Cell::from(Span::styled(window_label, header_style)),
     ]);
 
     let widths = [
