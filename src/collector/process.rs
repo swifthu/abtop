@@ -377,16 +377,22 @@ pub fn cmd_has_binary(cmd: &str, name: &str) -> bool {
     })
 }
 
-/// Windows variant: also splits on `\`, strips a trailing `.exe`, and matches
-/// case-insensitively. Kept separate from the unix impl so non-Windows
-/// matching stays exact (`Claude` must not match `claude` on linux/macOS).
+/// Windows variant: also splits on `\`, strips a trailing `.exe` and common
+/// script extensions (`.js`, `.sh`, `.py`), and matches case-insensitively.
+/// Kept separate from the unix impl so non-Windows matching stays exact
+/// (`Claude` must not match `claude` on linux/macOS).
 #[cfg(windows)]
 pub fn cmd_has_binary(cmd: &str, name: &str) -> bool {
     let mut tokens = cmd.split_whitespace().take(2);
     tokens.any(|tok| {
         let mut iter = tok.rsplit(['/', '\\']);
         let base = iter.next().unwrap_or(tok);
-        let base = base.strip_suffix(".exe").unwrap_or(base);
+        let base = base
+            .strip_suffix(".exe")
+            .or_else(|| base.strip_suffix(".js"))
+            .or_else(|| base.strip_suffix(".sh"))
+            .or_else(|| base.strip_suffix(".py"))
+            .unwrap_or(base);
         if base.eq_ignore_ascii_case(name) {
             return true;
         }
