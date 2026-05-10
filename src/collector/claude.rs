@@ -1500,7 +1500,6 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                             }
                         }
                         Some("user") => {
-                            let is_tool_result = is_tool_result_user_msg(val.get("message"));
                             // Compute tool call duration: time from assistant turn to this user turn
                             if entry_ts_ms > 0 && result.last_assistant_ts_ms > 0 {
                                 let duration =
@@ -1524,15 +1523,20 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                                 result.last_assistant_ts_ms = 0;
                             }
                             // Mark the start of a thinking window — next assistant
-                            // turn clears it. **Skip tool_result wrappers**:
-                            // Claude Code serializes both real prompts and tool
-                            // results as `user`-role lines, but only real prompts
-                            // mean "model has been asked, no reply yet". A tool
-                            // loop alternates assistant(tool_use) ↔ user(tool_result)
-                            // inside one logical turn, and treating each
-                            // tool_result as the start of a new thinking window
-                            // makes the status flicker Think ↔ Wait per tool call.
-                            if entry_ts_ms > 0 && !is_tool_result {
+                            // turn clears it. **Skip synthetic user lines**:
+                            // Claude Code serializes both real prompts and a number
+                            // of non-prompt entries (tool_result wrappers, slash
+                            // commands like /plugin, ! bash invocations, meta
+                            // caveats) as `user`-role lines. Only real prompts
+                            // mean "model has been asked, no reply yet"; the
+                            // others either belong inside an existing turn or
+                            // are pure local operations that never invoke the
+                            // model. Treating them as a thinking window pins
+                            // the session in Thinking forever (e.g. /plugin
+                            // update flushes 3 user-role lines and no
+                            // assistant reply ever arrives to clear them).
+                            let synthetic = is_synthetic_user_msg(&val);
+                            if entry_ts_ms > 0 && !synthetic {
                                 result.last_user_ts_ms = entry_ts_ms;
                             }
                             result.saw_turn = true;
@@ -1542,13 +1546,15 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                             if let Some(b) = val.get("gitBranch").and_then(|b| b.as_str()) {
                                 result.git_branch = b.to_string();
                             }
-                            // Extract first user prompt as session title
-                            if result.initial_prompt.is_empty() {
+                            // Extract first user prompt as session title — also
+                            // skip synthetic lines so the title isn't
+                            // "<command-name>/plugin..." or a bash stdout dump.
+                            if result.initial_prompt.is_empty() && !synthetic {
                                 if let Some(msg) = val.get("message") {
                                     result.initial_prompt = extract_prompt_text(msg);
                                 }
                             }
-                            if !is_tool_result {
+                            if !synthetic {
                                 if let Some(msg) = val.get("message") {
                                     let user_text = extract_chat_text(msg);
                                     if !user_text.is_empty() {
@@ -1585,25 +1591,45 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
 /// Handles both string content and array-of-blocks content.
 /// Encode a cwd path to match Claude Code's project directory naming.
 /// Claude Code replaces '/', '_', and '.' with '-'.
-/// True iff a `user`-role transcript message is a tool_result wrapper
-/// (Claude Code returns tool outputs to the model as user-role messages
-/// whose content blocks are `{type: "tool_result", ...}`). Used to keep
-/// tool loops from flickering the Thinking status: only real prompts
-/// should open a new thinking window.
+/// True iff a `user`-role transcript entry is *synthetic* — i.e. not a
+/// real human prompt that the model still owes a reply for. Three forms:
 ///
-/// Conservative: returns true only when the message has content blocks
-/// AND every block is a tool_result. A mixed block message is treated
-/// as a real prompt so we never silently swallow user input.
-fn is_tool_result_user_msg(message: Option<&Value>) -> bool {
-    let Some(message) = message else { return false };
-    let Some(Value::Array(arr)) = message.get("content") else {
-        return false;
-    };
-    if arr.is_empty() {
-        return false;
+/// 1. `isMeta: true` — Claude Code's explicit marker for non-prompt
+///    entries (e.g. the `<local-command-caveat>` line).
+/// 2. `content` is an array and every block is `tool_result` — the
+///    user-role wrapper Claude Code uses to feed tool output back to
+///    the model. A mixed block message is treated as a real prompt so
+///    we never silently swallow user input.
+/// 3. `content` is a string opening with a known local-command tag —
+///    `/plugin`, `/exit`, `!bash`, etc. all serialize as user-role
+///    lines like `<command-name>...`, `<local-command-stdout>...`,
+///    `<bash-input>...`. These are pure local operations that never
+///    invoke the model, so treating them as a prompt would leave
+///    `last_user_ts_ms` stuck and pin the session in Thinking forever.
+fn is_synthetic_user_msg(entry: &Value) -> bool {
+    if entry.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return true;
     }
-    arr.iter()
-        .all(|block| block.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+    let Some(message) = entry.get("message") else { return false };
+    match message.get("content") {
+        Some(Value::Array(arr)) => {
+            !arr.is_empty()
+                && arr.iter().all(|block| {
+                    block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                })
+        }
+        Some(Value::String(s)) => {
+            let t = s.trim_start();
+            t.starts_with("<local-command-stdout>")
+                || t.starts_with("<local-command-stderr>")
+                || t.starts_with("<local-command-caveat>")
+                || t.starts_with("<command-name>")
+                || t.starts_with("<bash-input>")
+                || t.starts_with("<bash-stdout>")
+                || t.starts_with("<bash-stderr>")
+        }
+        _ => false,
+    }
 }
 
 fn push_chat_message(messages: &mut Vec<ChatMessage>, role: ChatRole, text: String) {
@@ -2131,6 +2157,56 @@ mod tests {
         let result = parse_transcript(file.path(), 0);
 
         assert_eq!(result.last_context_tokens, 12_004);
+    }
+
+    #[test]
+    fn test_parse_transcript_slash_command_does_not_open_thinking_window() {
+        // Regression: `/plugin update` (and other pure-local slash commands)
+        // flush 2-3 user-role lines into the transcript and never produce an
+        // assistant reply. Before the fix, the trailing `<local-command-stdout>`
+        // line set last_user_ts_ms and the session was pinned in Thinking
+        // forever (Think generating reply). All three line shapes must be
+        // treated as synthetic.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(&mut file, &[
+            // Real prompt + assistant reply to seed a clean Wait state.
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hello"}]}}"#,
+            // The three user-role lines `/plugin update` writes:
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<command-name>/plugin</command-name>\n<command-args>update foo</command-args>"}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<local-command-stdout>Updated foo</local-command-stdout>"}}"#,
+        ]);
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert!(result.saw_turn);
+        assert_eq!(
+            result.last_user_ts_ms, 0,
+            "/plugin local-command lines must not reopen the thinking window",
+        );
+        // Title must come from the real prompt, not the synthetic lines.
+        assert_eq!(result.initial_prompt, "hi");
+    }
+
+    #[test]
+    fn test_parse_transcript_bash_input_does_not_open_thinking_window() {
+        // `!ls` and friends serialize as <bash-input>/<bash-stdout> user-role
+        // lines with no assistant reply. Same failure mode as /plugin.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(&mut file, &[
+            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"ok"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:05Z","message":{"role":"user","content":"<bash-input>ls</bash-input>"}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:05Z","message":{"role":"user","content":"<bash-stdout>a\nb</bash-stdout><bash-stderr></bash-stderr>"}}"#,
+        ]);
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert!(result.saw_turn);
+        assert_eq!(
+            result.last_user_ts_ms, 0,
+            "<bash-input>/<bash-stdout> lines must not reopen the thinking window",
+        );
     }
 
     #[test]
