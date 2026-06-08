@@ -790,6 +790,12 @@ impl ClaudeCollector {
     }
 }
 
+impl Default for ClaudeCollector {
+    fn default() -> Self {
+        Self::with_configured_dirs(Vec::new())
+    }
+}
+
 impl super::AgentCollector for ClaudeCollector {
     fn collect(&mut self, shared: &super::SharedProcessData) -> Vec<AgentSession> {
         self.collect_sessions(shared)

@@ -843,6 +843,12 @@ impl CodexCollector {
     }
 }
 
+impl Default for CodexCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl super::AgentCollector for CodexCollector {
     fn collect(&mut self, shared: &super::SharedProcessData) -> Vec<AgentSession> {
         self.collect_sessions(shared)

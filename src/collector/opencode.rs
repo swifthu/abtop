@@ -377,6 +377,12 @@ LIMIT {};"#,
     }
 }
 
+impl Default for OpenCodeCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl super::AgentCollector for OpenCodeCollector {
     fn collect(&mut self, shared: &super::SharedProcessData) -> Vec<AgentSession> {
         self.collect_sessions(shared)

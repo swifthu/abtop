@@ -13,7 +13,9 @@
 use crate::app::App;
 use crate::collector::mcp::ACTIVE_MTIME_SECS;
 use crate::host_info::{AgentAggregate, HostMetrics};
-use crate::model::{ChatRole, ChildProcess, OrphanPort, RateLimitInfo, SessionStatus, MAX_CHAT_MESSAGES};
+use crate::model::{
+    ChatRole, ChildProcess, OrphanPort, RateLimitInfo, SessionStatus, MAX_CHAT_MESSAGES,
+};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -377,5 +379,14 @@ mod tests {
         // Re-parse as generic JSON to confirm it is well-formed.
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert!(parsed["sessions"].is_array());
+    }
+
+    #[test]
+    fn readme_documents_json_snapshot_privacy_surface() {
+        let readme = include_str!("../README.md");
+        assert!(readme.contains("--json"));
+        assert!(readme.contains("JSON snapshot includes"));
+        assert!(readme.contains("chat_messages"));
+        assert!(readme.contains("summary"));
     }
 }
