@@ -209,8 +209,6 @@ fn draw_source_column(
         )));
     }
     if let Some(used_pct) = rl.seven_day_pct {
-        // Visual gap between the 5h and 7d bars so they don't sit flush.
-        lines.push(Line::from(""));
         let remaining = (100.0 - used_pct).clamp(0.0, 100.0);
         let reset = if show_reset {
             rl.seven_day_resets_at
@@ -220,9 +218,13 @@ fn draw_source_column(
             String::new()
         };
         let c = grad_at(cpu_grad, used_pct);
+        // 7d label gets one extra leading space so its bar starts a column
+        // to the right of the 5h bar — a subtle visual gutter between the
+        // two rows (instead of pushing 7d down a full line and breaking
+        // column alignment across sources).
         let label_7d = t("quota.7d");
         let mut s = vec![styled_label(
-            format!(" {}", label_7d).as_str(),
+            format!("  {}", label_7d).as_str(),
             theme.graph_text,
         )];
         s.extend(remaining_bar(remaining, bar_w, cpu_grad, theme.meter_bg));
