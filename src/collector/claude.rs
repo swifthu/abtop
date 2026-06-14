@@ -1885,13 +1885,33 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn context_window_for_model(transcript_model: &str, configured_model: &str, max_context_tokens: u64) -> u64 {
-    if transcript_model.contains("[1m]") || configured_model.contains("[1m]") || max_context_tokens > 200_000 {
-        1_000_000
-    } else {
-        200_000
+    fn context_window_for_model(transcript_model: &str, configured_model: &str, max_context_tokens: u64) -> u64 {
+        // 合并两个模型名字段（transcript + settings.json 配置），任一含子串即可。
+        // 优先级链：M3 > [1M] > M2.7 > 原启发式 fallback。
+        let combined = format!(
+            "{} {}",
+            transcript_model.to_ascii_lowercase(),
+            configured_model.to_ascii_lowercase()
+        );
+
+        // minimax 模型名精确匹配
+        if combined.contains("m3") {
+            return 512_000;
+        }
+        if combined.contains("[1m]") {
+            return 1_000_000;
+        }
+        if combined.contains("m2.7") {
+            return 200_000;
+        }
+
+        // Fallback: 原启发式（基于观测到的 max token 数）
+        if max_context_tokens > 200_000 {
+            1_000_000
+        } else {
+            200_000
+        }
     }
-}
 
 /// Returns the ordered list of Claude Code settings files to check, from
 /// highest to lowest priority, matching Claude Code's own resolution order:
@@ -3110,6 +3130,38 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
             context_window_for_model("claude-opus-4-6", "", 250_000),
             1_000_000
         );
+
+        // --- minimax 模型名精确映射 ---
+
+        // M3 → 512K
+        assert_eq!(context_window_for_model("MiniMax-M3", "", 0), 512_000);
+        assert_eq!(
+            context_window_for_model("MiniMax-M3-highspeed", "", 100_000),
+            512_000
+        );
+        assert_eq!(context_window_for_model("claude-opus-4-6", "MiniMax-M3", 0), 512_000);
+        // 大小写不敏感
+        assert_eq!(context_window_for_model("minimax-m3", "", 0), 512_000);
+        assert_eq!(context_window_for_model("MINIMAX-M3", "", 0), 512_000);
+
+        // [1M] 后缀 → 1M（M3 优先，M3[1M] 走 512K 见下方）
+        assert_eq!(context_window_for_model("MiniMax-M3[1M]", "", 0), 512_000);
+        assert_eq!(
+            context_window_for_model("MiniMax-something[1M]", "", 0),
+            1_000_000
+        );
+        assert_eq!(context_window_for_model("claude-opus-4-6[1M]", "", 0), 1_000_000);
+
+        // M2.7 → 200K
+        assert_eq!(context_window_for_model("MiniMax-M2.7", "", 0), 200_000);
+        assert_eq!(
+            context_window_for_model("minimax-m2.7-highspeed", "", 0),
+            200_000
+        );
+
+        // 跨字段匹配：transcript 不含、configured 含也应命中
+        assert_eq!(context_window_for_model("", "MiniMax-M3", 0), 512_000);
+        assert_eq!(context_window_for_model("", "MiniMax-M2.7", 0), 200_000);
     }
 
     #[test]
