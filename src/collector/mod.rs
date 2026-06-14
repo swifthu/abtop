@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod mcp;
+pub mod mmx_quota;
 pub mod opencode;
 pub mod process;
 pub mod rate_limit;
