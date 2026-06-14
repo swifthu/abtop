@@ -14,7 +14,7 @@ use super::{btop_block_active, fmt_tokens, grad_at, make_gradient, remaining_bar
 const STALE_SECS: u64 = 600;
 
 /// Fixed source order so columns stay stable across runs.
-const SOURCES: &[&str] = &["claude", "codex"];
+const SOURCES: &[&str] = &["mmx", "claude"];
 
 pub(crate) fn draw_quota_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_quota_panel_active(f, app, area, theme, false);
