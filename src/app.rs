@@ -95,6 +95,10 @@ pub struct App {
     prev_tokens: HashMap<(String, String), u64>,
     /// Rate limit poll counter (read every 5 ticks = 10s)
     rate_limit_counter: u32,
+    /// mmx quota poll counter (read every 6 rate-limit cycles ≈ 60s).
+    /// Independent of `rate_limit_counter` so the 60s cadence is
+    /// preserved even if the Claude/Codex cadence is tuned later.
+    mmx_counter: u32,
     collector: MultiCollector,
     /// Cached LLM-generated summaries, keyed by session_id.
     pub summaries: HashMap<String, String>,
@@ -179,6 +183,7 @@ impl App {
             rate_limits: Vec::new(),
             prev_tokens: HashMap::new(),
             rate_limit_counter: 5,
+            mmx_counter: 0,
             collector,
             summaries,
             pending_summaries: HashSet::new(),
@@ -544,6 +549,18 @@ impl App {
         } else {
             self.rate_limit_counter += 1;
         }
+
+        // mmx quota: 60s cadence, independent counter. First tick fires
+        // immediately (mmx_counter == 0); thereafter every 6 rate-limit
+        // cycles (6 × 10s ≈ 60s).
+        if self.mmx_counter == 0 || self.mmx_counter % 6 == 0 {
+            // Replace the prior mmx entry (if any) to avoid stale rows.
+            self.rate_limits.retain(|r| r.source != "mmx");
+            if let Some(info) = crate::collector::mmx_quota::read_mmx_quota() {
+                self.rate_limits.push(info);
+            }
+        }
+        self.mmx_counter = self.mmx_counter.wrapping_add(1);
 
         promote_waiting_to_rate_limited(&mut self.sessions, &self.rate_limits);
     }
