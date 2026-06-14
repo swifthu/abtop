@@ -16,6 +16,16 @@ const STALE_SECS: u64 = 600;
 /// Fixed source order so columns stay stable across runs.
 const SOURCES: &[&str] = &["mmx", "claude"];
 
+/// Map a source ID to its user-facing display label. The CLI / internal
+/// source ID stays `"mmx"` (matching the `mmx quota` binary name); only
+/// the TUI shows the friendlier "MiniMax" label.
+fn display_label(source: &str) -> String {
+    match source.to_ascii_lowercase().as_str() {
+        "mmx" => "MiniMax".to_string(),
+        other => other.to_uppercase(),
+    }
+}
+
 pub(crate) fn draw_quota_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_quota_panel_active(f, app, area, theme, false);
 }
@@ -116,7 +126,7 @@ fn draw_source_column(
         let no_data = t("quota.no_data");
         let lines = vec![
             Line::from(Span::styled(
-                format!(" {}", source.to_uppercase()),
+                format!(" {}", display_label(source)),
                 Style::default()
                     .fg(theme.title)
                     .add_modifier(Modifier::BOLD),
@@ -154,7 +164,7 @@ fn draw_source_column(
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!(" {}", rl.source.to_uppercase()),
+        format!(" {}", display_label(&rl.source)),
         Style::default()
             .fg(source_color)
             .add_modifier(Modifier::BOLD),
@@ -199,6 +209,8 @@ fn draw_source_column(
         )));
     }
     if let Some(used_pct) = rl.seven_day_pct {
+        // Visual gap between the 5h and 7d bars so they don't sit flush.
+        lines.push(Line::from(""));
         let remaining = (100.0 - used_pct).clamp(0.0, 100.0);
         let reset = if show_reset {
             rl.seven_day_resets_at
