@@ -1887,19 +1887,20 @@ fn truncate(s: &str, max: usize) -> String {
 
     fn context_window_for_model(transcript_model: &str, configured_model: &str, max_context_tokens: u64) -> u64 {
         // 合并两个模型名字段（transcript + settings.json 配置），任一含子串即可。
-        // 优先级链：M3 > [1M] > M2.7 > 原启发式 fallback。
+        // 优先级链：[1M] > M3 > M2.7 > 原启发式 fallback。
+        // `[1M]` 显式 1M 标记（含 `MiniMax-M3[1M]`）优先于 M3 基线 512K。
         let combined = format!(
             "{} {}",
             transcript_model.to_ascii_lowercase(),
             configured_model.to_ascii_lowercase()
         );
 
-        // minimax 模型名精确匹配
-        if combined.contains("m3") {
-            return 512_000;
-        }
+        // minimax 模型名精确匹配（顺序重要：[1M] 比 M3 优先）
         if combined.contains("[1m]") {
             return 1_000_000;
+        }
+        if combined.contains("m3") {
+            return 512_000;
         }
         if combined.contains("m2.7") {
             return 200_000;
@@ -3144,8 +3145,8 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         assert_eq!(context_window_for_model("minimax-m3", "", 0), 512_000);
         assert_eq!(context_window_for_model("MINIMAX-M3", "", 0), 512_000);
 
-        // [1M] 后缀 → 1M（M3 优先，M3[1M] 走 512K 见下方）
-        assert_eq!(context_window_for_model("MiniMax-M3[1M]", "", 0), 512_000);
+        // [1M] 后缀 → 1M（`[1M]` 优先于 M3 基线，所以 `MiniMax-M3[1M]` 走 1M）
+        assert_eq!(context_window_for_model("MiniMax-M3[1M]", "", 0), 1_000_000);
         assert_eq!(
             context_window_for_model("MiniMax-something[1M]", "", 0),
             1_000_000
