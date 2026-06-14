@@ -45,7 +45,7 @@ pub(crate) fn draw_quota_panel_active(
     let ticks_per_min = 30usize;
     let tokens_per_min: f64 = rates.iter().rev().take(ticks_per_min).sum();
 
-    // Split into side-by-side columns: one per known source (CLAUDE | CODEX).
+    // Split into side-by-side columns: one per known source (MMX | CLAUDE).
     // Columns are always rendered so the panel layout stays stable even when a
     // source has no data yet.
     let num_sources = SOURCES.len() as u16;

@@ -7,7 +7,6 @@
 
 use crate::model::RateLimitInfo;
 use serde::Deserialize;
-use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
