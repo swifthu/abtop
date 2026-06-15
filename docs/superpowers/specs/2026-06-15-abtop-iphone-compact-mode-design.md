@@ -15,11 +15,12 @@
 - 底部精简按键提示
 
 **核心约束**（来自用户澄清）：
-- 触发条件：窗口宽度 ≤ 46 列时进入 iPhone mode；> 46 列走原 narrow/desktop 逻辑
+- **iPhone mode 触发**：窗口宽度 ≤ 46 列 且 高度 ≥ 18 行
+- **回落提示**：当宽度 ≤ 46 但高度 < 18 时，连 iPhone mode 都装不下，回落显示统一的 "Terminal too small" 提示（复用现有 too-small 渲染），但消息里明确提示 "iPhone mode needs at least 46×18"
+- **其他宽度**：> 46 列走原 narrow/desktop 逻辑（60-99 narrow、≥ 100 desktop）
 - 交互形态：单页整合（无 tab 切换），保留 ↑↓ select + Enter jump 到 tmux 的原体验
 - 数据源：复用现有 `app.sessions`、`session.chat_messages`、`app.rate_limits`，无新增数据采集
 - 视觉层次：4 条 ─ 分隔线带区域名（quota / sessions / chat / footer），让用户在 46 列宽度下仍能快速定位
-- 不破坏：≥ 47 列的现有 narrow/desktop 行为完全不变
 
 ## 2. 布局（46×35）
 
@@ -207,7 +208,8 @@ pub(crate) fn draw_iphone_mode(
 
 ```rust
 // src/ui/mod.rs
-pub(crate) const IPHONE_WIDTH: u16 = 46;
+pub(crate) const IPHONE_WIDTH: u16 = 46;       // iPhone mode 触发阈值
+pub(crate) const IPHONE_MIN_HEIGHT: u16 = 18;  // iPhone mode 最低高度
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -217,14 +219,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     // ... 现有背景填充 ...
 
     // iPhone mode 必须在 too small 检查之前：iPhone 宽度 (≤46) 必然 < MIN_WIDTH (60)
-    if w <= IPHONE_WIDTH && h >= MIN_HEIGHT {
+    if w <= IPHONE_WIDTH && h >= IPHONE_MIN_HEIGHT {
         draw_iphone_mode(f, app, area, &app.theme);
         draw_overlays(f, app, &app.theme);
         return;
     }
 
     if w < MIN_WIDTH || h < MIN_HEIGHT {
-        // 现有 "too small" 提示
+        // 统一回落提示：现有 too small 渲染，但消息自适应最低尺寸
+        // 当 w ≤ 46 && h < IPHONE_MIN_HEIGHT 时显示 "iPhone mode needs 46×18"
+        // 当 60 > w > 46 时显示 "Narrow mode needs 60×18"
+        draw_too_small(f, area, &app.theme, w, h);
         return;
     }
 
@@ -240,6 +245,19 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 ```
 
+**`draw_too_small` 改动**：根据当前宽度自动选择推荐的目标模式提示：
+
+```rust
+fn draw_too_small(f: &mut Frame, area: Rect, theme: &Theme, w: u16, h: u16) {
+    let (target_w, target_h, target_label) = if w <= IPHONE_WIDTH {
+        (IPHONE_WIDTH, IPHONE_MIN_HEIGHT, "iphone mode")
+    } else {
+        (MIN_WIDTH, MIN_HEIGHT, "narrow mode")
+    };
+    // ... 渲染 "Terminal too small" + 当前 w/h + "Need at least WxH for <target_label>"
+}
+```
+
 ### 4.4 边界条件
 
 | 场景 | 行为 |
@@ -249,7 +267,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 | session 数 1-7 | 全部显示，下方留空（不补 padding） |
 | `app.rate_limits` 为空 | quota 区显示 `mmx —  / cl —` |
 | 选中 session 无 `chat_messages` | CHAT 区显示 "no chat yet" |
-| 窗口高度 < 35 | 按行优先级截断：footer > quota > meta；session 区按 3 行/session 向下缩减到剩余空间 |
+| 宽度 ≤ 46 且 高度 < 18 | 回落显示 "iPhone mode needs at least 46×18"（复用 too-small 渲染） |
+| 宽度 47-59 且 高度 < 18 | 回落显示 "Narrow mode needs at least 60×18" |
+| iPhone mode 高度 18-34 | session 区按 3 行/session 自动缩减到剩余空间，footer/chat/分隔线全部保留 |
+| iPhone mode 高度 ≥ 35 | 满布局（7 sessions + 5 chat + 4 分隔线） |
 | 选中 index 超出可见范围 | 自动 clamp 到第一个 visible session（现有 `clamp_selection_to_visible` 逻辑） |
 
 ### 4.5 渲染性能
@@ -343,36 +364,50 @@ fn iphone_mode_separator_centers_section_name() {
 **触发顺序**（`src/ui/mod.rs::draw` 中）：
 
 ```rust
-if w <= IPHONE_WIDTH && h >= MIN_HEIGHT {  // 新增，放在 too small 之前
+// 优先级 1：iPhone mode（必须在 too small 之前，宽度 ≤46 必然 < MIN_WIDTH 60）
+if w <= IPHONE_WIDTH && h >= IPHONE_MIN_HEIGHT {
     draw_iphone_mode(f, app, area, &app.theme);
     draw_overlays(f, app, &app.theme);
     return;
 }
 
-if w < MIN_WIDTH || h < MIN_HEIGHT {  // MIN_WIDTH = 60, MIN_HEIGHT = 18
-    // existing "Terminal size too small" prompt
+// 优先级 2：回落提示（统一处理：iPhone 装不下 / narrow 装不下）
+if w < MIN_WIDTH || h < MIN_HEIGHT {
+    draw_too_small(f, area, &app.theme, w, h);
     return;
 }
 
-if w < DESKTOP_WIDTH {  // DESKTOP_WIDTH = 100
+// 优先级 3：narrow
+if w < DESKTOP_WIDTH {
     draw_narrow(f, app, area, theme);
     draw_overlays(f, app, &app.theme);
     return;
 }
 
-// ≥ 100 columns: desktop layout (unchanged)
+// 优先级 4：desktop
+let layout = desktop_layout(app, area);
+// ... 现有代码不变 ...
 ```
 
-**宽度分支矩阵**：
+**宽度分支矩阵**（h ≥ 18 时）：
 
-| 宽度范围 | 高度 ≥ 18 | 高度 < 18 |
-|---|---|---|
-| ≤ 46 | **iPhone mode（新增）** | "too small" |
-| 47-59 | "too small"（不变） | "too small"（不变） |
-| 60-99 | narrow（不变） | "too small"（不变） |
-| ≥ 100 | desktop（不变） | "too small"（不变） |
+| 宽度范围 | 行为 |
+|---|---|
+| ≤ 46 | **iPhone mode（新增）** |
+| 47-59 | "Narrow mode needs 60×18" 提示 |
+| 60-99 | narrow 模式（不变） |
+| ≥ 100 | desktop 模式（不变） |
 
-iPhone mode 完全替代 47-59 区域（原走 "too small" 提示），这是有意设计：iPhone 用户从 "无法使用" 升级到 "完整可用"。
+**高度 < 18 时**（任意宽度）：
+
+| 宽度范围 | 行为 |
+|---|---|
+| ≤ 46 | "iPhone mode needs 46×18" 提示 |
+| 47-59 | "Narrow mode needs 60×18" 提示 |
+| 60-99 | "Narrow mode needs 60×18" 提示 |
+| ≥ 100 | "Desktop mode needs 100×18" 提示（扩展现有 too small 提示） |
+
+iPhone mode 完全替代 47-59 区域的"无法使用"状态——这是有意设计：iPhone 用户从 "无法使用" 升级到 "完整可用"。
 
 **不破坏**：60-99 列的 narrow 模式、≥ 100 列的 desktop 模式、现有交互键（↑↓/Enter/x/?/q）、panel 渲染逻辑全部不变。
 
