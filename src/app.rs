@@ -553,7 +553,7 @@ impl App {
         // mmx quota: 60s cadence, independent counter. First tick fires
         // immediately (mmx_counter == 0); thereafter every 6 rate-limit
         // cycles (6 × 10s ≈ 60s).
-        if self.mmx_counter == 0 || self.mmx_counter % 6 == 0 {
+        if self.mmx_counter == 0 || self.mmx_counter.is_multiple_of(6) {
             // Replace the prior mmx entry (if any) to avoid stale rows.
             self.rate_limits.retain(|r| r.source != "mmx");
             if let Some(info) = crate::collector::mmx_quota::read_mmx_quota() {
