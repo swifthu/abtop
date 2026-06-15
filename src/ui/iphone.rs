@@ -84,7 +84,7 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
         Constraint::Length(1),                       // sessions divider
         Constraint::Length(actual_sessions_h),       // sessions
         Constraint::Length(1),                       // chat divider
-        Constraint::Length(actual_chat_h as u16),    // chat
+        Constraint::Min(actual_chat_h as u16),       // chat (fills remaining)
         Constraint::Length(1),                       // footer divider
         Constraint::Length(1),                       // footer
     ];
@@ -340,10 +340,13 @@ fn draw_session_row1(
         Style::default().fg(theme.hi_fg)
     };
 
+    // Brand colors match the desktop session panel: terracotta / periwinkle / emerald.
+    // iPhone layout lacks width for the `*`/`>`/`#` prefix used on desktop, so we
+    // use bare 2-letter labels and rely on color for the brand cue.
     let (agent_label, agent_color) = match session.agent_cli {
-        "claude" => ("CC", theme.title),
-        "codex" => ("CD", theme.title),
-        "opencode" => ("OC", theme.title),
+        "claude" => ("CC", Color::Rgb(217, 119, 87)),    // #D97757 terracotta
+        "codex" => ("CD", Color::Rgb(122, 157, 255)),    // #7A9DFF periwinkle
+        "opencode" => ("OC", Color::Rgb(74, 222, 128)),  // #4ADE80 emerald
         other => {
             // Leak-free fallback: borrow a stack buffer.
             let s: String = other.chars().take(2).collect::<String>().to_uppercase();
@@ -488,12 +491,20 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
 
     let h = area.height as usize;
-    let take = session.chat_messages.len().min(h);
+    // Cap rendered messages at CHAT_VISIBLE — anything older scrolled off.
+    let take = session.chat_messages.len().min(CHAT_VISIBLE);
     let start = session.chat_messages.len() - take;
-    let lines: Vec<Line> = session.chat_messages[start..]
+    let mut lines: Vec<Line> = session.chat_messages[start..]
         .iter()
         .map(|m| chat_line(m, theme))
         .collect();
+    // Bottom-pin: when the chat panel is taller than the message tail (because
+    // sessions < 7 left extra rows), pad with empty lines above so the most
+    // recent message sits at the bottom of the panel.
+    let pad = h.saturating_sub(take);
+    for _ in 0..pad {
+        lines.insert(0, Line::from(""));
+    }
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -501,7 +512,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 fn chat_line(msg: &ChatMessage, theme: &Theme) -> Line<'static> {
     let (prefix, color) = match msg.role {
         ChatRole::User => ("U", theme.hi_fg),
-        ChatRole::Assistant => ("A", theme.title),
+        // proc_misc (green across themes) signals "active/in-progress" — the
+        // assistant role is the agent's own voice, distinct from the user's hi_fg.
+        ChatRole::Assistant => ("A", theme.proc_misc),
     };
     Line::from(vec![
         Span::styled(
@@ -702,5 +715,195 @@ mod tests {
         assert!(text.contains("p06"), "7th session should render\n{text}");
         assert!(!text.contains("p07"), "8th session should NOT render\n{text}");
         assert!(!text.contains("p09"), "10th session should NOT render\n{text}");
+    }
+
+    /// Helper: find the 1-indexed line in the rendered buffer that contains `needle`.
+    /// Returns 0 if not found.
+    fn line_of(text: &str, needle: &str) -> usize {
+        for (i, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                return i + 1;
+            }
+        }
+        0
+    }
+
+    /// Helper: find the last 1-indexed line containing `needle`. Returns 0 if not found.
+    fn last_line_of(text: &str, needle: &str) -> usize {
+        text.lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(needle))
+            .last()
+            .map(|(i, _)| i + 1)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn iphone_mode_chat_expands_when_few_sessions() {
+        // Same dimensions (46x35), two scenarios: 7 sessions vs 2 sessions.
+        // With 7 sessions: chat = CHAT_VISIBLE (5) rows.
+        // With 2 sessions: chat should expand to absorb the leftover rows.
+        //
+        // Footer divider sits at row 32 (35 - 2 footer rows - 1 footer divider).
+        // With 7 sessions, the chat divider is at row 35 - 1 (footer) - 1 (foot div)
+        //   - 1 (chat) - 5 (chat area) = 27.
+        // With 2 sessions, sessions use only 6 rows instead of 21, leaving
+        //   15 extra rows for chat -> chat divider should be 12 rows higher.
+        let make_app = |n: usize, with_chat: bool| {
+            let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+            for i in 0..n {
+                let mut s = crate::model::AgentSession {
+                    agent_cli: "claude",
+                    pid: 1000 + i as u32,
+                    session_id: format!("s{i}"),
+                    cwd: "/tmp".into(),
+                    project_name: format!("p{i}"),
+                    started_at: 0,
+                    status: crate::model::SessionStatus::Waiting,
+                    model: "claude-sonnet-4-6".into(),
+                    effort: String::new(),
+                    context_percent: 10.0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_read: 0,
+                    total_cache_create: 0,
+                    turn_count: 1,
+                    current_tasks: vec![],
+                    mem_mb: 0,
+                    version: String::new(),
+                    git_branch: String::new(),
+                    git_added: 0,
+                    git_modified: 0,
+                    token_history: Vec::new(),
+                    context_history: Vec::new(),
+                    compaction_count: 0,
+                    context_window: 0,
+                    subagents: Vec::new(),
+                    mem_file_count: 0,
+                    mem_line_count: 0,
+                    children: Vec::new(),
+                    initial_prompt: String::new(),
+                    first_assistant_text: String::new(),
+                    chat_messages: Vec::new(),
+                    tool_calls: Vec::new(),
+                    pending_since_ms: 0,
+                    thinking_since_ms: 0,
+                    file_accesses: Vec::new(),
+                    config_root: String::new(),
+                };
+                if with_chat {
+                    s.chat_messages.push(crate::model::ChatMessage {
+                        role: crate::model::ChatRole::User,
+                        text: "hi".into(),
+                    });
+                }
+                app.sessions.push(s);
+            }
+            app
+        };
+
+        // 7 sessions baseline.
+        let app7 = make_app(7, true);
+        let backend7 = TestBackend::new(46, 35);
+        let mut term7 = Terminal::new(backend7).unwrap();
+        term7
+            .draw(|f| draw_iphone_mode(f, &app7, f.area(), &app7.theme))
+            .unwrap();
+        let text7 = format!("{}", term7.backend());
+        let chat_div_7 = line_of(&text7, "chats");
+        assert!(chat_div_7 > 0, "chat divider should render\n{text7}");
+
+        // 2 sessions: chat divider should appear noticeably earlier (higher up).
+        let app2 = make_app(2, true);
+        let backend2 = TestBackend::new(46, 35);
+        let mut term2 = Terminal::new(backend2).unwrap();
+        term2
+            .draw(|f| draw_iphone_mode(f, &app2, f.area(), &app2.theme))
+            .unwrap();
+        let text2 = format!("{}", term2.backend());
+        let chat_div_2 = line_of(&text2, "chats");
+        assert!(chat_div_2 > 0, "chat divider should render\n{text2}");
+
+        // 5 sessions * 3 rows = 15 fewer session rows -> chat divider should
+        // move up by ~15 rows.
+        assert!(
+            chat_div_7.saturating_sub(chat_div_2) >= 10,
+            "chat panel should expand when sessions < 7: \
+             chat_div_7={chat_div_7}, chat_div_2={chat_div_2}\n--- 7 sessions ---\n{text7}\n--- 2 sessions ---\n{text2}"
+        );
+    }
+
+    #[test]
+    fn iphone_mode_chat_messages_bottom_pinned() {
+        // With 1 message and an expanded chat area, the message should appear
+        // at the bottom of the chat panel, not the top.
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        app.sessions.push(crate::model::AgentSession {
+            agent_cli: "claude",
+            pid: 1,
+            session_id: "solo".into(),
+            cwd: "/tmp".into(),
+            project_name: "solo".into(),
+            started_at: 0,
+            status: crate::model::SessionStatus::Waiting,
+            model: "claude-sonnet-4-6".into(),
+            effort: String::new(),
+            context_percent: 0.0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read: 0,
+            total_cache_create: 0,
+            turn_count: 1,
+            current_tasks: vec![],
+            mem_mb: 0,
+            version: String::new(),
+            git_branch: String::new(),
+            git_added: 0,
+            git_modified: 0,
+            token_history: Vec::new(),
+            context_history: Vec::new(),
+            compaction_count: 0,
+            context_window: 0,
+            subagents: Vec::new(),
+            mem_file_count: 0,
+            mem_line_count: 0,
+            children: Vec::new(),
+            initial_prompt: String::new(),
+            first_assistant_text: String::new(),
+            chat_messages: vec![crate::model::ChatMessage {
+                role: crate::model::ChatRole::User,
+                text: "BOTTOM_ANCHOR".into(),
+            }],
+            tool_calls: Vec::new(),
+            pending_since_ms: 0,
+            thinking_since_ms: 0,
+            file_accesses: Vec::new(),
+            config_root: String::new(),
+        });
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        let chat_div = line_of(&text, "chats");
+        let footer_div = line_of(&text, "────");
+        let anchor = line_of(&text, "BOTTOM_ANCHOR");
+        assert!(chat_div > 0, "chat divider must render\n{text}");
+        assert!(anchor > chat_div, "message below chat divider\n{text}");
+        // Footer divider is the second occurrence of `────` (first is between
+        // quota and sessions). Find last one to locate chat panel end.
+        let last_dashes = last_line_of(&text, "────");
+        assert!(last_dashes > 0, "footer divider must render\n{text}");
+        // With 1 session, chat panel is large; the single message should sit
+        // closer to the footer divider than to the chat divider (bottom-pinned).
+        let chat_h = last_dashes - chat_div - 1;
+        let dist_from_top = anchor - chat_div - 1;
+        let dist_from_bottom = chat_h - dist_from_top;
+        assert!(
+            dist_from_bottom < dist_from_top,
+            "message should be bottom-pinned: \
+             chat_h={chat_h}, dist_from_top={dist_from_top}, dist_from_bottom={dist_from_bottom}\n{text}"
+        );
     }
 }
