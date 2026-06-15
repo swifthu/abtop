@@ -9,30 +9,35 @@ use ratatui::Frame;
 
 use super::quota::format_reset_time;
 use super::sessions::shorten_model;
-use super::{fmt_tokens, grad_at, make_gradient, truncate_str};
+use super::{braille_graph_multirow, fmt_tokens, grad_at, make_gradient, truncate_str};
 
 /// Maximum number of sessions rendered in the iPhone-mode list.
 const MAX_VISIBLE_SESSIONS: usize = 5;
-/// Rows of chat tail shown for the selected session.
-const CHAT_VISIBLE: usize = 5;
 /// Max chars for the rendered task text (`└─ ...`).
 const TASK_TRUNCATE: usize = 38;
 /// Max chars for the project column.
 const PROJECT_TRUNCATE: usize = 12;
 /// Max chars for the model name shown in the session row 1.
 const MODEL_TRUNCATE: usize = 12;
+/// Width of each tokens-panel bar (label-relative, in cells). The desktop
+/// panel renders at variable width; on iPhone we pin it so the right-hand
+/// "Token Rate / graph / Total" column has predictable space.
+const TOKENS_BAR_W: u16 = 11;
 
-/// Short plain-text status label (e.g. "Think", "Wait"). No icon prefix —
-/// visual signal comes from color + the context row 3 task line.
-pub(crate) fn status_short(status: &SessionStatus) -> &'static str {
-    match status {
-        SessionStatus::Thinking => "Think",
-        SessionStatus::Executing => "Exec",
-        SessionStatus::Waiting => "Wait",
-        SessionStatus::Unknown => "Unk",
-        SessionStatus::RateLimited => "Rate",
-        SessionStatus::Done => "Done",
-    }
+/// Localized status label with the same icon prefix used on the desktop
+/// session panel (e.g. "● Think", "◌ Wait", "✓ Done"). The icon is part
+/// of the i18n string so a Chinese-locale user sees "● 思考" without code
+/// changes.
+pub(crate) fn status_short(status: &SessionStatus) -> String {
+    let key = match status {
+        SessionStatus::Thinking => "sess.think",
+        SessionStatus::Executing => "sess.exec",
+        SessionStatus::Waiting => "sess.wait",
+        SessionStatus::Unknown => "sess.unknown",
+        SessionStatus::RateLimited => "sess.rate",
+        SessionStatus::Done => "sess.done",
+    };
+    crate::locale::t(key)
 }
 
 /// Entry point for iPhone (sub-60-column) compact mode.
@@ -46,11 +51,10 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
     let h = area.height;
     let visible_sessions = app.sessions.len().min(MAX_VISIBLE_SESSIONS);
     let sessions_h = (visible_sessions as u16) * 3;
-    let chat_h = if app.sessions.is_empty() {
-        1u16
-    } else {
-        CHAT_VISIBLE as u16
-    };
+    // The chat panel's only floor is 1 row (so the "no chat yet" placeholder
+    // stays single-line when there are no sessions). Above that, the layout
+    // gives the chat panel every remaining row, and `draw_chat` then fills
+    // it with as many recent messages as fit, bottom-pinned.
     let fixed_h = 2 // meta
         + 1 // quota divider
         + 2 // quota
@@ -65,7 +69,7 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
     // Round down to multiples of 3 so we never show a partial session block.
     actual_sessions_h -= actual_sessions_h % 3;
     let actual_visible = (actual_sessions_h / 3) as usize;
-    let actual_chat_h = if app.sessions.is_empty() { 1 } else { chat_h as usize };
+    let actual_chat_h = 1usize;
 
     let constraints = vec![
         Constraint::Length(2),                       // meta
@@ -227,9 +231,12 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 /// Render one quota bucket row using ratatui's native `LineGauge` widget.
 /// Layout: `5h ` (3) + LineGauge (fills remaining) + " " + time (always two parts,
-/// e.g. `in 2h 13m`, prefixed by a leading space). Bar color follows usage percent:
-/// green (<60%) / yellow (60-80%) / red (>=80%). Percentage is shown inside the
-/// gauge label.
+/// e.g. `in 2h 13m`, prefixed by a leading space). The bar represents
+/// **remaining** quota (100% − used%), so a long green bar means a lot of
+/// headroom and a short red bar means the bucket is nearly drained. Bar
+/// color follows the remaining share: green (>40%) / yellow (20–40%) /
+/// red (<20%). The percentage on the gauge label is also the remaining
+/// share.
 fn quota_bucket_row(
     f: &mut Frame,
     label: &str,
@@ -258,21 +265,23 @@ fn quota_bucket_row(
     );
 
     match pct {
-        Some(p) => {
-            // Bar color comes from usage percent, not countdown.
-            let color = if p >= 80.0 {
+        Some(used) => {
+            // Convert "used" share to "remaining" share. The bar's length and
+            // color both describe how much is left, not how much is spent.
+            let left = (100.0 - used).clamp(0.0, 100.0);
+            let color = if left < 20.0 {
                 theme.status_fg
-            } else if p >= 60.0 {
+            } else if left < 40.0 {
                 theme.warning_fg
             } else {
                 theme.proc_misc
             };
-            let ratio = (p / 100.0).clamp(0.0, 1.0);
+            let ratio = (left / 100.0).clamp(0.0, 1.0);
             let gauge = LineGauge::default()
                 .ratio(ratio)
                 .filled_style(Style::default().fg(color))
                 .unfilled_style(Style::default().fg(theme.meter_bg))
-                .label(format!("{:>3.0}%", p));
+                .label(format!("{:>3.0}%", left));
             f.render_widget(gauge, chunks[1]);
 
             // Time text: " in 2h 13m" (leading space + format_reset_time)
@@ -440,7 +449,7 @@ fn draw_session_row1(
         spans.push(Span::raw(" ".repeat(pad)));
     }
     spans.push(Span::styled(
-        status.to_string(),
+        status,
         Style::default().fg(status_color).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
@@ -512,12 +521,18 @@ fn draw_session_row3(
     );
 }
 
-/// Render the 5-row tokens panel (Total / In / Out / CacheR / CacheW)
-/// for the currently selected session. The Total row has NO gauge
-/// (label + value only — total is 100% by definition). Other rows show
-/// a native `LineGauge` colored to match the value, with no percentage
-/// label on the gauge (just the bar + value text on the right). Falls
-/// back to a placeholder when no session is selected.
+/// Render the 5-row tokens panel for the currently selected session.
+///
+/// Layout: a single 5×2 grid.
+/// - **Left column** (label + bar + value): Total row has no bar; the
+///   other four rows show a native `LineGauge` whose width is
+///   `TOKENS_BAR_W` cells (3 wider than the previous version so the bar
+///   reads at a glance from arm's length).
+/// - **Right column** mirrors the desktop context panel: a "Token Rate"
+///   line on top, three rows of a `braille_graph_multirow` of
+///   `app.token_rates` in the middle, and a "Total N" line at the bottom.
+///
+/// Falls back to a placeholder when no session is selected.
 fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let session = match app.sessions.get(app.selected) {
         Some(s) => s,
@@ -548,8 +563,10 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let main_style = Style::default().fg(theme.main_fg);
     let cache_r_style = Style::default().fg(theme.session_id);
     let cache_w_style = Style::default().fg(theme.proc_misc);
+    let graph_text = theme.graph_text;
 
-    // Split area vertically into 5 rows
+    // Split the panel vertically into 5 rows, then each row into a left
+    // (bar) column and a right (graph) column.
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -561,68 +578,171 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         ])
         .split(area);
 
+    // Right column needs at least 1 char gap from the bar; left column
+    // holds 6-char label + 1 gap + bar + 1 gap + value.
     let labels = ["Total", "In", "Out", "CacheR", "CacheW"];
     let values = [total_all, total_in, total_out, total_cache_r, total_cache_w];
     let value_styles = [total_style, main_style, main_style, cache_r_style, cache_w_style];
-    let value_colors = [theme.title, theme.main_fg, theme.main_fg, theme.session_id, theme.proc_misc];
+    let value_colors = [
+        theme.title,
+        theme.main_fg,
+        theme.main_fg,
+        theme.session_id,
+        theme.proc_misc,
+    ];
     let value_strs: Vec<String> = values.iter().map(|v| fmt_tokens(*v)).collect();
 
     for i in 0..5 {
+        let row = rows[i];
+        // 6 label + 1 gap + TOKENS_BAR_W bar + 1 gap + value + 1 gap = 20
+        // for 46-col iPhone. Right column fills the remainder.
+        let total_left = 6 + 1 + TOKENS_BAR_W as usize + 1 + 6 + 1;
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(total_left as u16),
+                Constraint::Min(0),
+            ])
+            .split(row);
+        let left = cols[0];
+        let right = cols[1];
+
+        // ── left column ────────────────────────────────────────────────
         if i == 0 {
-            // Total: label + value, NO gauge (total is 100% by definition).
-            let chunks = Layout::default()
+            // Total: label + value, NO bar.
+            let lchunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Length(6),    // label
+                    Constraint::Length(1),    // gap
                     Constraint::Min(0),       // value
                 ])
-                .split(rows[i]);
+                .split(left);
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!("{:<6}", labels[i]),
                     label_style,
                 ))),
-                chunks[0],
+                lchunks[0],
             );
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     value_strs[i].clone(),
                     value_styles[i],
                 ))),
-                chunks[1],
+                lchunks[2],
             );
         } else {
-            // Other rows: label + gauge + value, NO percentage label.
-            let chunks = Layout::default()
+            // Other rows: label + bar + value.
+            let lchunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(6),    // label (CacheR is 6 chars)
-                    Constraint::Length(8),    // LineGauge
-                    Constraint::Min(0),       // value
+                    Constraint::Length(6),                    // label
+                    Constraint::Length(1),                    // gap
+                    Constraint::Length(TOKENS_BAR_W),         // bar
+                    Constraint::Length(1),                    // gap
+                    Constraint::Min(0),                       // value
                 ])
-                .split(rows[i]);
-
+                .split(left);
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!("{:<6}", labels[i]),
                     label_style,
                 ))),
-                chunks[0],
+                lchunks[0],
             );
-
             let gauge = LineGauge::default()
                 .ratio(ratio(values[i]))
                 .filled_style(Style::default().fg(value_colors[i]))
                 .unfilled_style(Style::default().fg(theme.meter_bg))
                 .label("");
-            f.render_widget(gauge, chunks[1]);
-
+            f.render_widget(gauge, lchunks[2]);
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     value_strs[i].clone(),
                     value_styles[i],
                 ))),
-                chunks[2],
+                lchunks[4],
+            );
+        }
+
+        // ── right column ───────────────────────────────────────────────
+        if i == 0 {
+            // Top: "Token Rate" label + current rate per minute.
+            let rates: Vec<f64> = app.token_rates.iter().copied().collect();
+            let max_rate = rates.iter().copied().fold(1.0_f64, f64::max);
+            let current_rate = *rates.last().unwrap_or(&0.0);
+            let pct = if max_rate > 0.0 {
+                (current_rate / max_rate * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            let cpu_grad = make_gradient(
+                theme.cpu_grad.start,
+                theme.cpu_grad.mid,
+                theme.cpu_grad.end,
+            );
+            let rate_color = grad_at(&cpu_grad, pct);
+            let rate_label = crate::locale::t("context.token_rate");
+            let rchunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(rate_label.chars().count() as u16 + 1),
+                    Constraint::Min(0),
+                ])
+                .split(right);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    rate_label,
+                    Style::default().fg(graph_text),
+                ))),
+                rchunks[0],
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{}/min", fmt_tokens(current_rate as u64)),
+                    Style::default().fg(rate_color),
+                ))),
+                rchunks[1],
+            );
+        } else if (1..=3).contains(&i) {
+            // Middle 3 rows: braille graph of token rate history.
+            let rates: Vec<f64> = app.token_rates.iter().copied().collect();
+            let max_rate = rates.iter().copied().fold(1.0_f64, f64::max);
+            let normalized: Vec<f64> = rates.iter().map(|&v| v / max_rate).collect();
+            let cpu_grad = make_gradient(
+                theme.cpu_grad.start,
+                theme.cpu_grad.mid,
+                theme.cpu_grad.end,
+            );
+            let graph_w = right.width.saturating_sub(1) as usize;
+            // Render the 3-row graph once and pick the row matching `i`.
+            // (Cheaper than re-running braille_graph_multirow per row, and
+            // keeps the data pipeline in a single place.)
+            let rows_spans = braille_graph_multirow(
+                &normalized,
+                graph_w,
+                3,
+                &cpu_grad,
+                graph_text,
+            );
+            let row_spans = rows_spans
+                .get(i - 1)
+                .cloned()
+                .unwrap_or_default();
+            f.render_widget(Paragraph::new(Line::from(row_spans)), right);
+        } else {
+            // Bottom (i == 4): "Total <value>".
+            let total_label = crate::locale::t("context.total");
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(total_label, Style::default().fg(graph_text)),
+                    Span::styled(
+                        format!(" {}", fmt_tokens(total_all)),
+                        Style::default().fg(theme.main_fg),
+                    ),
+                ])),
+                right,
             );
         }
     }
@@ -654,8 +774,10 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
 
     let h = area.height as usize;
-    // Cap rendered messages at CHAT_VISIBLE — anything older scrolled off.
-    let take = session.chat_messages.len().min(CHAT_VISIBLE);
+    // Fill the chat panel with as many recent messages as fit, up to the
+    // actual panel height. CHAT_VISIBLE is no longer a hard cap — the only
+    // ceiling is the rows the layout gives us. Older messages scroll off.
+    let take = session.chat_messages.len().min(h);
     let start = session.chat_messages.len() - take;
     let mut lines: Vec<Line> = session.chat_messages[start..]
         .iter()
@@ -1160,7 +1282,8 @@ mod tests {
     #[test]
     fn iphone_mode_chat_expands_when_few_sessions() {
         // Same dimensions (46x35), two scenarios: 5 sessions vs 2 sessions.
-        // With 5 sessions (the cap): chat = CHAT_VISIBLE (5) rows.
+        // With 5 sessions (the cap): chat = whatever rows remain after the
+        // fixed rows (meta/quotas/tokens/dividers/footer).
         // With 2 sessions: chat should expand to absorb the leftover rows.
         //
         // The 5-session cap means 2 sessions use 6 rows instead of 15,
@@ -1321,5 +1444,40 @@ mod tests {
             "message should be bottom-pinned: \
              chat_h={chat_h}, dist_from_top={dist_from_top}, dist_from_bottom={dist_from_bottom}\n{text}"
         );
+    }
+
+    #[test]
+    fn iphone_mode_chat_fills_panel_beyond_five() {
+        // The chat panel is no longer capped at 5 messages — it should fill
+        // the available rows. With 1 session there is plenty of vertical
+        // room, so 12 messages should all appear in the rendered buffer.
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        let mut s = make_test_session("p0", 1000, 2000, 3000, 4000);
+        for i in 0..12 {
+            let role = if i % 2 == 0 {
+                crate::model::ChatRole::User
+            } else {
+                crate::model::ChatRole::Assistant
+            };
+            s.chat_messages.push(crate::model::ChatMessage {
+                role,
+                text: format!("msg{i:02}"),
+            });
+        }
+        app.sessions.push(s);
+
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        for i in 0..12 {
+            let needle = format!("msg{i:02}");
+            assert!(
+                text.contains(&needle),
+                "chat message {needle} should render (chat panel fills all available rows)\n{text}"
+            );
+        }
     }
 }
