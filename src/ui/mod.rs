@@ -316,6 +316,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     );
 
     if w < MIN_WIDTH || h < MIN_HEIGHT {
+        // Mode labels stay as English product names (not localized via t()):
+        // "iphone mode" / "narrow mode" / "desktop mode" are mode identifiers,
+        // parallel to how "Claude" / "Codex" / "OpenCode" appear untranslated in
+        // agent labels. Translating them would require a separate locale key per
+        // mode name and add no value.
         let (target_w, target_h, target_label) = if w <= IPHONE_WIDTH {
             (IPHONE_WIDTH, IPHONE_MIN_HEIGHT, "iphone mode")
         } else if w < DESKTOP_WIDTH {
@@ -1385,6 +1390,19 @@ mod tests {
         assert!(
             text.contains("narrow mode"),
             "55x15 should hint at narrow mode\n{text}"
+        );
+    }
+
+    #[test]
+    fn too_small_promotes_desktop_mode_when_height_below_18_at_100_width() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            text.contains("desktop mode"),
+            "120x10 should hint at desktop mode\n{text}"
         );
     }
 }
