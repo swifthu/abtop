@@ -12,13 +12,13 @@ use super::sessions::shorten_model;
 use super::{fmt_tokens, grad_at, make_gradient, truncate_str};
 
 /// Maximum number of sessions rendered in the iPhone-mode list.
-const MAX_VISIBLE_SESSIONS: usize = 7;
+const MAX_VISIBLE_SESSIONS: usize = 5;
 /// Rows of chat tail shown for the selected session.
 const CHAT_VISIBLE: usize = 5;
 /// Max chars for the rendered task text (`└─ ...`).
 const TASK_TRUNCATE: usize = 38;
 /// Max chars for the project column.
-const PROJECT_TRUNCATE: usize = 8;
+const PROJECT_TRUNCATE: usize = 12;
 /// Max chars for the model name shown in the session row 1.
 const MODEL_TRUNCATE: usize = 12;
 
@@ -35,16 +35,16 @@ fn quota_label(source: &str) -> &'static str {
     }
 }
 
-/// Compact status icon + short label for a session status.
-/// Format: `<icon><Word>` so the row reads e.g. `●Work`, `◌Wait`, `⚡Rate`, `✓Done`.
-fn status_short(status: &SessionStatus) -> &'static str {
+/// Short plain-text status label (e.g. "Think", "Wait"). No icon prefix —
+/// visual signal comes from color + the context row 3 task line.
+pub(crate) fn status_short(status: &SessionStatus) -> &'static str {
     match status {
-        SessionStatus::Thinking => "◉Work",
-        SessionStatus::Executing => "●Exec",
-        SessionStatus::Waiting => "◌Wait",
-        SessionStatus::Unknown => "?Unk",
-        SessionStatus::RateLimited => "⚡Rate",
-        SessionStatus::Done => "✓Done",
+        SessionStatus::Thinking => "Think",
+        SessionStatus::Executing => "Exec",
+        SessionStatus::Waiting => "Wait",
+        SessionStatus::Unknown => "Unk",
+        SessionStatus::RateLimited => "Rate",
+        SessionStatus::Done => "Done",
     }
 }
 
@@ -52,8 +52,9 @@ fn status_short(status: &SessionStatus) -> &'static str {
 ///
 /// Triggered by `src/ui/mod.rs::draw` when `width < MIN_WIDTH` and
 /// `height >= IPHONE_MIN_HEIGHT`. Renders a single-page integrated layout:
-/// meta + quota + sessions (max 7 × 3 rows) + selected session chat (5)
-/// + footer keybinds, separated by ── named dividers.
+/// meta + quota + sessions (max 5 × 3 rows) + tokens panel (5 rows) +
+/// selected session chat (5) + footer keybinds, separated by ── named
+/// dividers.
 pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let h = area.height;
     let visible_sessions = app.sessions.len().min(MAX_VISIBLE_SESSIONS);
@@ -67,8 +68,10 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
         + 1 // quota divider
         + 2 // quota
         + 1 // sessions divider
+        + 1 // tokens divider
+        + 5 // tokens
         + 1 // chat divider
-        + 1 // chat
+        + 1 // chat (min)
         + 1 // footer divider
         + 1; // footer
     let mut actual_sessions_h = sessions_h.min(h.saturating_sub(fixed_h));
@@ -83,6 +86,8 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
         Constraint::Length(2),                       // quota
         Constraint::Length(1),                       // sessions divider
         Constraint::Length(actual_sessions_h),       // sessions
+        Constraint::Length(1),                       // tokens divider
+        Constraint::Length(5),                       // tokens
         Constraint::Length(1),                       // chat divider
         Constraint::Min(actual_chat_h as u16),       // chat (fills remaining)
         Constraint::Length(1),                       // footer divider
@@ -94,14 +99,16 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
         .split(area);
 
     draw_meta(f, app, chunks[0], theme);
-    draw_divider(f, chunks[1], theme, "quota");
+    draw_divider(f, chunks[1], theme, "quota", theme.cpu_box);
     draw_quota(f, app, chunks[2], theme);
-    draw_divider(f, chunks[3], theme, "sessions");
+    draw_divider(f, chunks[3], theme, "sessions", theme.proc_box);
     draw_sessions(f, app, chunks[4], theme, actual_visible);
-    draw_chat_divider(f, chunks[5], app, theme);
-    draw_chat(f, app, chunks[6], theme);
-    draw_divider(f, chunks[7], theme, "");
-    draw_footer(f, chunks[8], theme);
+    draw_divider(f, chunks[5], theme, "tokens", theme.cpu_box);
+    draw_tokens(f, app, chunks[6], theme);
+    draw_chat_divider(f, chunks[7], app, theme);
+    draw_chat(f, app, chunks[8], theme);
+    draw_divider(f, chunks[9], theme, "", theme.div_line);
+    draw_footer(f, chunks[10], theme);
 }
 
 /// Row 1: title + time + active↑ + session count
@@ -176,7 +183,12 @@ fn draw_meta(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 }
 
 /// Render a divider row with a centered `─ label ─` band.
-fn draw_divider(f: &mut Frame, area: Rect, theme: &Theme, label: &str) {
+///
+/// `box_color` is the color used for the dashes and the bold label band,
+/// matching the desktop panel-box palette. Callers typically pass
+/// `theme.cpu_box` (quota / tokens) or `theme.proc_box` (sessions / chat).
+/// Pass `theme.div_line` for the bare footer separator.
+fn draw_divider(f: &mut Frame, area: Rect, theme: &Theme, label: &str, box_color: Color) {
     let w = area.width as usize;
     let mut spans: Vec<Span> = Vec::new();
     if label.is_empty() {
@@ -192,19 +204,17 @@ fn draw_divider(f: &mut Frame, area: Rect, theme: &Theme, label: &str) {
         if left > 0 {
             spans.push(Span::styled(
                 "─".repeat(left),
-                Style::default().fg(theme.div_line),
+                Style::default().fg(box_color),
             ));
         }
         spans.push(Span::styled(
             band,
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(box_color).add_modifier(Modifier::BOLD),
         ));
         if right > 0 {
             spans.push(Span::styled(
                 "─".repeat(right),
-                Style::default().fg(theme.div_line),
+                Style::default().fg(box_color),
             ));
         }
     }
@@ -225,7 +235,7 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     } else {
         " chats ".to_string()
     };
-    draw_divider(f, area, theme, &label);
+    draw_divider(f, area, theme, &label, theme.proc_box);
 }
 
 /// Render two quota rows: one per source (mmx, claude), each showing
@@ -465,6 +475,52 @@ fn draw_session_row3(
     );
 }
 
+/// Render the 5-row aggregated tokens panel (Total / In / Out / CacheR / CacheW).
+/// Sums each bucket across all sessions for an at-a-glance view of context use.
+fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    let total_in: u64 = app.sessions.iter().map(|s| s.total_input_tokens).sum();
+    let total_out: u64 = app.sessions.iter().map(|s| s.total_output_tokens).sum();
+    let total_cache_r: u64 = app.sessions.iter().map(|s| s.total_cache_read).sum();
+    let total_cache_w: u64 = app.sessions.iter().map(|s| s.total_cache_create).sum();
+    let total_all = total_in + total_out + total_cache_r + total_cache_w;
+
+    let label_style = Style::default().fg(theme.graph_text);
+    let total_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+    let cache_w_style = Style::default().fg(theme.proc_misc);
+    let cache_r_style = Style::default().fg(theme.session_id);
+    let main_style = Style::default().fg(theme.main_fg);
+
+    let label_w = "CacheR".chars().count(); // 6, the longest label
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!(" {:<w$}", "Total", w = label_w), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(fmt_tokens(total_all), total_style),
+        ]),
+        Line::from(vec![
+            Span::styled(format!(" {:<w$}", "In", w = label_w), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(fmt_tokens(total_in), main_style),
+        ]),
+        Line::from(vec![
+            Span::styled(format!(" {:<w$}", "Out", w = label_w), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(fmt_tokens(total_out), main_style),
+        ]),
+        Line::from(vec![
+            Span::styled(format!(" {:<w$}", "CacheR", w = label_w), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(fmt_tokens(total_cache_r), cache_r_style),
+        ]),
+        Line::from(vec![
+            Span::styled(format!(" {:<w$}", "CacheW", w = label_w), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(fmt_tokens(total_cache_w), cache_w_style),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 /// Chat tail: up to 5 recent user/assistant messages from the selected session.
 /// Falls back to a placeholder when there are no messages.
 fn draw_chat(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -627,7 +683,16 @@ mod tests {
         let text = format!("{}", terminal.backend());
         assert!(text.contains("►"), "selected marker\n{text}");
         assert!(text.contains("CC") || text.contains("CD") || text.contains("OC"), "agent label\n{text}");
-        assert!(text.contains("●") || text.contains("◌") || text.contains("⚡"), "status icon\n{text}");
+        // Status is now plain text — no icon prefix.
+        assert!(
+            text.contains("Think")
+                || text.contains("Exec")
+                || text.contains("Wait")
+                || text.contains("Rate")
+                || text.contains("Done")
+                || text.contains("Unk"),
+            "status label\n{text}"
+        );
         assert!(text.contains("turns"), "stats row\n{text}");
         assert!(text.contains("└─"), "task row\n{text}");
     }
@@ -644,7 +709,26 @@ mod tests {
         let text = format!("{}", terminal.backend());
         assert!(text.contains(" quota "), "quota divider\n{text}");
         assert!(text.contains(" sessions "), "sessions divider\n{text}");
+        assert!(text.contains(" tokens "), "tokens divider\n{text}");
         assert!(text.contains("chats"), "chat divider\n{text}");
+    }
+
+    #[test]
+    fn iphone_mode_tokens_panel_present() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        demo::populate_demo(&mut app);
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(text.contains(" tokens "), "tokens divider\n{text}");
+        assert!(text.contains("Total"), "Total label\n{text}");
+        assert!(text.contains("In "), "In label\n{text}");
+        assert!(text.contains("Out"), "Out label\n{text}");
+        assert!(text.contains("CacheR"), "CacheR label\n{text}");
+        assert!(text.contains("CacheW"), "CacheW label\n{text}");
     }
 
     #[test]
@@ -662,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn iphone_mode_caps_at_7_sessions() {
+    fn iphone_mode_caps_at_5_sessions() {
         let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
         for i in 0..10 {
             app.sessions.push(crate::model::AgentSession {
@@ -712,8 +796,8 @@ mod tests {
             .unwrap();
         let text = format!("{}", terminal.backend());
         assert!(text.contains("p00"), "first session should render\n{text}");
-        assert!(text.contains("p06"), "7th session should render\n{text}");
-        assert!(!text.contains("p07"), "8th session should NOT render\n{text}");
+        assert!(text.contains("p04"), "5th session should render\n{text}");
+        assert!(!text.contains("p05"), "6th session should NOT render\n{text}");
         assert!(!text.contains("p09"), "10th session should NOT render\n{text}");
     }
 
@@ -740,15 +824,12 @@ mod tests {
 
     #[test]
     fn iphone_mode_chat_expands_when_few_sessions() {
-        // Same dimensions (46x35), two scenarios: 7 sessions vs 2 sessions.
-        // With 7 sessions: chat = CHAT_VISIBLE (5) rows.
+        // Same dimensions (46x35), two scenarios: 5 sessions vs 2 sessions.
+        // With 5 sessions (the cap): chat = CHAT_VISIBLE (5) rows.
         // With 2 sessions: chat should expand to absorb the leftover rows.
         //
-        // Footer divider sits at row 32 (35 - 2 footer rows - 1 footer divider).
-        // With 7 sessions, the chat divider is at row 35 - 1 (footer) - 1 (foot div)
-        //   - 1 (chat) - 5 (chat area) = 27.
-        // With 2 sessions, sessions use only 6 rows instead of 21, leaving
-        //   15 extra rows for chat -> chat divider should be 12 rows higher.
+        // The 5-session cap means 2 sessions use 6 rows instead of 15,
+        // leaving 9 extra rows for chat -> chat divider should be ~9 rows higher.
         let make_app = |n: usize, with_chat: bool| {
             let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
             for i in 0..n {
@@ -802,16 +883,16 @@ mod tests {
             app
         };
 
-        // 7 sessions baseline.
-        let app7 = make_app(7, true);
-        let backend7 = TestBackend::new(46, 35);
-        let mut term7 = Terminal::new(backend7).unwrap();
-        term7
-            .draw(|f| draw_iphone_mode(f, &app7, f.area(), &app7.theme))
+        // 5 sessions baseline (at the cap).
+        let app5 = make_app(5, true);
+        let backend5 = TestBackend::new(46, 35);
+        let mut term5 = Terminal::new(backend5).unwrap();
+        term5
+            .draw(|f| draw_iphone_mode(f, &app5, f.area(), &app5.theme))
             .unwrap();
-        let text7 = format!("{}", term7.backend());
-        let chat_div_7 = line_of(&text7, "chats");
-        assert!(chat_div_7 > 0, "chat divider should render\n{text7}");
+        let text5 = format!("{}", term5.backend());
+        let chat_div_5 = line_of(&text5, "chats");
+        assert!(chat_div_5 > 0, "chat divider should render\n{text5}");
 
         // 2 sessions: chat divider should appear noticeably earlier (higher up).
         let app2 = make_app(2, true);
@@ -824,12 +905,12 @@ mod tests {
         let chat_div_2 = line_of(&text2, "chats");
         assert!(chat_div_2 > 0, "chat divider should render\n{text2}");
 
-        // 5 sessions * 3 rows = 15 fewer session rows -> chat divider should
-        // move up by ~15 rows.
+        // 3 fewer sessions * 3 rows = 9 fewer session rows -> chat divider
+        // should move up by ~9 rows.
         assert!(
-            chat_div_7.saturating_sub(chat_div_2) >= 10,
-            "chat panel should expand when sessions < 7: \
-             chat_div_7={chat_div_7}, chat_div_2={chat_div_2}\n--- 7 sessions ---\n{text7}\n--- 2 sessions ---\n{text2}"
+            chat_div_5.saturating_sub(chat_div_2) >= 6,
+            "chat panel should expand when sessions < 5: \
+             chat_div_5={chat_div_5}, chat_div_2={chat_div_2}\n--- 5 sessions ---\n{text5}\n--- 2 sessions ---\n{text2}"
         );
     }
 
