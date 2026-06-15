@@ -1423,8 +1423,12 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let text = format!("{}", terminal.backend());
         assert!(
-            text.contains("iphone mode"),
+            text.contains("abtop v"),
             "46x35 should dispatch to iPhone mode\n{text}"
+        );
+        assert!(
+            text.contains("quota"),
+            "46x35 should render iPhone quota section\n{text}"
         );
         assert!(
             !text.contains("Terminal too small"),

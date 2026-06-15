@@ -220,6 +220,11 @@ impl AgentSession {
             format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
         }
     }
+
+    /// Elapsed seconds since the session started (saturating).
+    pub fn elapsed_seconds(&self) -> u64 {
+        self.elapsed().as_secs()
+    }
 }
 
 #[derive(Debug, Deserialize)]
