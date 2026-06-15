@@ -4,7 +4,7 @@ use crate::theme::Theme;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{LineGauge, Paragraph};
 use ratatui::Frame;
 
 use super::quota::format_reset_time;
@@ -225,18 +225,34 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     draw_divider(f, area, theme, &label, theme.proc_box);
 }
 
-/// Render one quota bucket row, e.g. `5h ████░░░░ 36% reset in 2h 13m`.
-/// When `pct` is `None`, render a dimmed placeholder: `5h  ──────  —  no data`.
+/// Render one quota bucket row using ratatui's native `LineGauge` widget.
+/// Layout: `5h ` (3) + LineGauge (8) + pct + reset text (rest).
+/// When `pct` is `None`, render a dimmed zero-ratio gauge with `— no data`.
 fn quota_bucket_row(
+    f: &mut Frame,
     label: &str,
     pct: Option<f64>,
     reset: Option<u64>,
     theme: &Theme,
-) -> Line<'static> {
-    let label_style = Style::default()
-        .fg(theme.title)
-        .add_modifier(Modifier::BOLD);
+    area: Rect,
+) {
+    let label_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+    let pct_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
     let reset_style = Style::default().fg(theme.graph_text);
+
+    // Sub-layout: "5h " (3) + gauge (8) + pct% + reset text (rest)
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(3),    // "5h "
+            Constraint::Length(8),    // LineGauge
+            Constraint::Min(0),       // pct + reset
+        ])
+        .split(area);
+
+    // Label: "5h "
+    let label_span = Span::styled(format!("{label} "), label_style);
+    f.render_widget(Paragraph::new(Line::from(label_span)), chunks[0]);
 
     match pct {
         Some(p) => {
@@ -247,55 +263,69 @@ fn quota_bucket_row(
             } else {
                 theme.proc_misc
             };
-            // 6-char progress bar: filled ████░░░░
-            let bar_w: usize = 6;
-            let filled = ((p / 100.0) * bar_w as f64).round() as usize;
-            let filled = filled.min(bar_w);
-            let empty = bar_w - filled;
-            let bar_str = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
-            let pct_str = format!("{:>3.0}%", p);
+            // Native LineGauge: ratio 0.0-1.0
+            let ratio = (p / 100.0).clamp(0.0, 1.0);
+            let gauge = LineGauge::default()
+                .ratio(ratio)
+                .filled_style(Style::default().fg(bar_color))
+                .unfilled_style(Style::default().fg(theme.meter_bg))
+                .label("");
+            f.render_widget(gauge, chunks[1]);
+
+            // Right side: " 36% reset in 2h 13m"
             let reset_str = reset
-                .map(|ts| format!(" reset in {}", format_reset_time(ts)))
-                .unwrap_or_default();
-            Line::from(vec![
-                Span::styled(format!("{:<3}", label), label_style),
-                Span::styled(" ", Style::default()),
-                Span::styled(bar_str, Style::default().fg(bar_color)),
-                Span::styled(" ", Style::default()),
-                Span::styled(pct_str, label_style),
-                Span::styled(reset_str, reset_style),
-            ])
+                .map(|ts| format!("{:>3.0}% reset in {}", p, format_reset_time(ts)))
+                .unwrap_or_else(|| format!("{:>3.0}%", p));
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(reset_str, pct_style))),
+                chunks[2],
+            );
         }
-        None => Line::from(vec![
-            Span::styled(format!("{:<3}", label), label_style),
-            Span::styled(" ", Style::default()),
-            Span::styled("──────", Style::default().fg(theme.inactive_fg)),
-            Span::styled(" ", Style::default()),
-            Span::styled("  — ", Style::default().fg(theme.inactive_fg)),
-            Span::styled(" no data", reset_style),
-        ]),
+        None => {
+            // No data: render the gauge at ratio 0 with dim color
+            let gauge = LineGauge::default()
+                .ratio(0.0)
+                .filled_style(Style::default().fg(theme.inactive_fg))
+                .unfilled_style(Style::default().fg(theme.meter_bg))
+                .label("");
+            f.render_widget(gauge, chunks[1]);
+
+            let na_str = "  — no data".to_string();
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(na_str, reset_style))),
+                chunks[2],
+            );
+        }
     }
 }
 
-/// Render two quota rows for the mmx source (5h and 7d).
+/// Render two quota rows for the mmx source (5h and 7d) using native LineGauge.
 fn draw_quota(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let mmx = app
         .rate_limits
         .iter()
         .find(|r| r.source.eq_ignore_ascii_case("mmx"));
-    let row_5h = quota_bucket_row(
+    // Split area vertically into 2 rows
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+    quota_bucket_row(
+        f,
         "5h",
         mmx.and_then(|r| r.five_hour_pct),
         mmx.and_then(|r| r.five_hour_resets_at),
         theme,
+        rows[0],
     );
-    let row_7d = quota_bucket_row(
+    quota_bucket_row(
+        f,
         "7d",
         mmx.and_then(|r| r.seven_day_pct),
         mmx.and_then(|r| r.seven_day_resets_at),
         theme,
+        rows[1],
     );
-    f.render_widget(Paragraph::new(vec![row_5h, row_7d]), area);
 }
 
 /// Session list: each session takes 3 rows (status header / stats / task).
@@ -477,8 +507,9 @@ fn draw_session_row3(
 }
 
 /// Render the 5-row tokens panel (Total / In / Out / CacheR / CacheW)
-/// for the currently selected session. Falls back to a placeholder when
-/// no session is selected.
+/// for the currently selected session, with a native `LineGauge` per row
+/// showing each metric's share of the total. Falls back to a placeholder
+/// when no session is selected.
 fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let session = match app.sessions.get(app.selected) {
         Some(s) => s,
@@ -499,6 +530,9 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let total_cache_w = session.total_cache_create;
     let total_all = total_in + total_out + total_cache_r + total_cache_w;
 
+    // Per-row ratio is the metric's share of total
+    let ratio = |v: u64| if total_all > 0 { v as f64 / total_all as f64 } else { 0.0 };
+
     let label_style = Style::default().fg(theme.title);
     let total_style = Style::default()
         .fg(theme.title)
@@ -507,35 +541,58 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let cache_r_style = Style::default().fg(theme.session_id);
     let cache_w_style = Style::default().fg(theme.proc_misc);
 
-    let label_w = "CacheR".chars().count(); // 6, the longest label
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(format!(" {:<w$}", "Total", w = label_w), label_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(fmt_tokens(total_all), total_style),
-        ]),
-        Line::from(vec![
-            Span::styled(format!(" {:<w$}", "In", w = label_w), label_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(fmt_tokens(total_in), main_style),
-        ]),
-        Line::from(vec![
-            Span::styled(format!(" {:<w$}", "Out", w = label_w), label_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(fmt_tokens(total_out), main_style),
-        ]),
-        Line::from(vec![
-            Span::styled(format!(" {:<w$}", "CacheR", w = label_w), label_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(fmt_tokens(total_cache_r), cache_r_style),
-        ]),
-        Line::from(vec![
-            Span::styled(format!(" {:<w$}", "CacheW", w = label_w), label_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(fmt_tokens(total_cache_w), cache_w_style),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(lines), area);
+    // Split area vertically into 5 rows
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let labels = ["Total", "In", "Out", "CacheR", "CacheW"];
+    let values = [total_all, total_in, total_out, total_cache_r, total_cache_w];
+    let value_styles = [total_style, main_style, main_style, cache_r_style, cache_w_style];
+    let value_colors = [theme.title, theme.main_fg, theme.main_fg, theme.session_id, theme.proc_misc];
+    let value_strs: Vec<String> = values.iter().map(|v| fmt_tokens(*v)).collect();
+
+    for i in 0..5 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),    // "CacheR" label (longest = 6 chars)
+                Constraint::Length(8),    // LineGauge
+                Constraint::Min(0),       // pct + value
+            ])
+            .split(rows[i]);
+
+        // Label
+        let label_span = Span::styled(format!("{:<6}", labels[i]), label_style);
+        f.render_widget(Paragraph::new(Line::from(label_span)), chunks[0]);
+
+        // Gauge — Total row is fully filled (it's the total); others show share
+        let r = if i == 0 { 1.0 } else { ratio(values[i]) };
+        let gauge = LineGauge::default()
+            .ratio(r)
+            .filled_style(Style::default().fg(value_colors[i]))
+            .unfilled_style(Style::default().fg(theme.meter_bg))
+            .label("");
+        f.render_widget(gauge, chunks[1]);
+
+        // Right side: pct + value
+        let pct_str = if i == 0 {
+            format!(" 100% {}", value_strs[i])
+        } else {
+            format!(" {:>3.0}% {}", r * 100.0, value_strs[i])
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(pct_str, value_styles[i]))),
+            chunks[2],
+        );
+    }
 }
 
 /// Chat tail: up to 5 recent user/assistant messages from the selected session.
@@ -683,12 +740,43 @@ mod tests {
             text.contains("mmx · quota"),
             "mmx · quota divider\n{text}"
         );
-        assert!(
-            text.contains("█") || text.contains("░") || text.contains("──────"),
-            "progress bar characters (█ / ░ when data present, or ────── when no data) should appear\n{text}"
-        );
         assert!(text.contains("5h"), "5h bucket\n{text}");
         assert!(text.contains("7d"), "7d bucket\n{text}");
+        assert!(text.contains("%"), "percentage should appear\n{text}");
+    }
+
+    #[test]
+    fn iphone_mode_quota_uses_native_gauge() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        // Add a rate limit so the gauge has data to render
+        app.rate_limits.push(crate::model::RateLimitInfo {
+            source: "mmx".to_string(),
+            five_hour_pct: Some(50.0),
+            five_hour_resets_at: Some(chrono::Utc::now().timestamp() as u64 + 7200),
+            seven_day_pct: Some(30.0),
+            seven_day_resets_at: Some(chrono::Utc::now().timestamp() as u64 + 172800),
+            updated_at: None,
+        });
+        demo::populate_demo(&mut app);
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        // Native LineGauge renders with horizontal line characters (default ─)
+        // for both the filled and unfilled portions, colored by their styles.
+        // We just need to confirm the gauge is actually being rendered into the
+        // quota rows — assert that "5h" row has a run of ─ characters where
+        // the manual █/░ bar used to live.
+        let line_5h = text
+            .lines()
+            .find(|l| l.contains("5h"))
+            .expect("5h row should render");
+        assert!(
+            line_5h.contains('─'),
+            "native LineGauge should render horizontal-line chars in the 5h row\n{line_5h}\n--- full ---\n{text}"
+        );
     }
 
     #[test]
