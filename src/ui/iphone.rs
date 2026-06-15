@@ -7,53 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{LineGauge, Paragraph};
 use ratatui::Frame;
 
+use super::quota::format_reset_time;
 use super::sessions::shorten_model;
 use super::{fmt_tokens, grad_at, make_gradient, truncate_str};
-
-/// Format a reset timestamp as a compact "2h 13m" / "13d 4h" / "30s" string.
-/// Max 7 chars (e.g. "13d 4h"). Returns "—" when reset is in the past.
-fn format_time_short(reset_ts: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if reset_ts <= now {
-        return "—".to_string();
-    }
-    let diff = reset_ts - now;
-    if diff < 60 {
-        format!("{}s", diff)
-    } else if diff < 3600 {
-        format!("{}m", diff / 60)
-    } else if diff < 86400 {
-        let h = diff / 3600;
-        let m = (diff % 3600) / 60;
-        if m == 0 {
-            format!("{}h", h)
-        } else {
-            format!("{}h {}m", h, m)
-        }
-    } else {
-        let d = diff / 86400;
-        let h = (diff % 86400) / 3600;
-        if h == 0 {
-            format!("{}d", d)
-        } else {
-            format!("{}d {}h", d, h)
-        }
-    }
-}
-
-/// Pick a color based on time remaining until reset. Green = far away,
-/// yellow = getting close, red = imminent.
-fn countdown_color(remaining_secs: Option<u64>, theme: &Theme) -> Color {
-    match remaining_secs {
-        Some(s) if s < 6 * 3600 => theme.status_fg,
-        Some(s) if s < 24 * 3600 => theme.warning_fg,
-        Some(_) => theme.proc_misc,
-        None => theme.inactive_fg,
-    }
-}
 
 /// Maximum number of sessions rendered in the iPhone-mode list.
 const MAX_VISIBLE_SESSIONS: usize = 5;
@@ -270,9 +226,10 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 /// Render one quota bucket row using ratatui's native `LineGauge` widget.
-/// Layout: `5h ` (3) + LineGauge (fills remaining) + " " + time (≤7 chars).
-/// Bar color follows time-until-reset: green (>24h) / yellow (6-24h) /
-/// red (<6h). Percentage is shown inside the gauge label.
+/// Layout: `5h ` (3) + LineGauge (fills remaining) + " " + time (always two parts,
+/// e.g. `in 2h 13m`, prefixed by a leading space). Bar color follows usage percent:
+/// green (<60%) / yellow (60-80%) / red (>=80%). Percentage is shown inside the
+/// gauge label.
 fn quota_bucket_row(
     f: &mut Frame,
     label: &str,
@@ -284,13 +241,13 @@ fn quota_bucket_row(
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
     let reset_style = Style::default().fg(theme.graph_text);
 
-    // Layout: "5h " (3) + LineGauge (fills) + " " + time (≤7 chars + padding)
+    // Layout: "5h " (3) + LineGauge (fills) + " " + time (" in 2h 13m", 9 chars)
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(3),    // "5h "
             Constraint::Min(0),       // LineGauge fills remaining
-            Constraint::Length(9),    // " 2h 13m" — space + up to 7 chars
+            Constraint::Length(11),   // " in 6d 12h" — leading space + 9 char time
         ])
         .split(area);
 
@@ -300,15 +257,16 @@ fn quota_bucket_row(
         chunks[0],
     );
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let remaining = reset.map(|ts| ts.saturating_sub(now));
-    let color = countdown_color(remaining, theme);
-
     match pct {
         Some(p) => {
+            // Bar color comes from usage percent, not countdown.
+            let color = if p >= 80.0 {
+                theme.status_fg
+            } else if p >= 60.0 {
+                theme.warning_fg
+            } else {
+                theme.proc_misc
+            };
             let ratio = (p / 100.0).clamp(0.0, 1.0);
             let gauge = LineGauge::default()
                 .ratio(ratio)
@@ -317,10 +275,11 @@ fn quota_bucket_row(
                 .label(format!("{:>3.0}%", p));
             f.render_widget(gauge, chunks[1]);
 
-            // Time text: " 2h 13m" (leading space + ≤7 char time)
+            // Time text: " in 2h 13m" (leading space + format_reset_time)
             let time_str = reset
-                .map(format_time_short)
-                .unwrap_or_else(|| "—".to_string());
+                .map(format_reset_time)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "in —".to_string());
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {time_str}"),
@@ -338,7 +297,7 @@ fn quota_bucket_row(
                 .label("—");
             f.render_widget(gauge, chunks[1]);
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled("  —", reset_style))),
+                Paragraph::new(Line::from(Span::styled(" in —", reset_style))),
                 chunks[2],
             );
         }
@@ -445,8 +404,9 @@ fn draw_session_row1(
 
     let status = status_short(&session.status);
     let status_color = match session.status {
-        SessionStatus::Thinking | SessionStatus::Executing => theme.proc_misc,
-        SessionStatus::Waiting => theme.graph_text,
+        SessionStatus::Thinking => theme.proc_misc,
+        SessionStatus::Executing => theme.hi_fg,
+        SessionStatus::Waiting => grad_at(grad, 50.0),
         SessionStatus::Unknown => theme.inactive_fg,
         SessionStatus::RateLimited => theme.status_fg,
         SessionStatus::Done => theme.inactive_fg,
@@ -553,9 +513,11 @@ fn draw_session_row3(
 }
 
 /// Render the 5-row tokens panel (Total / In / Out / CacheR / CacheW)
-/// for the currently selected session, with a native `LineGauge` per row
-/// showing each metric's share of the total. Falls back to a placeholder
-/// when no session is selected.
+/// for the currently selected session. The Total row has NO gauge
+/// (label + value only — total is 100% by definition). Other rows show
+/// a native `LineGauge` colored to match the value, with no percentage
+/// label on the gauge (just the bar + value text on the right). Falls
+/// back to a placeholder when no session is selected.
 fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let session = match app.sessions.get(app.selected) {
         Some(s) => s,
@@ -606,38 +568,63 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let value_strs: Vec<String> = values.iter().map(|v| fmt_tokens(*v)).collect();
 
     for i in 0..5 {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(6),    // "CacheR" label (longest = 6 chars)
-                Constraint::Length(8),    // LineGauge
-                Constraint::Min(0),       // pct + value
-            ])
-            .split(rows[i]);
-
-        // Label
-        let label_span = Span::styled(format!("{:<6}", labels[i]), label_style);
-        f.render_widget(Paragraph::new(Line::from(label_span)), chunks[0]);
-
-        // Gauge — Total row is fully filled (it's the total); others show share
-        let r = if i == 0 { 1.0 } else { ratio(values[i]) };
-        let gauge = LineGauge::default()
-            .ratio(r)
-            .filled_style(Style::default().fg(value_colors[i]))
-            .unfilled_style(Style::default().fg(theme.meter_bg))
-            .label("");
-        f.render_widget(gauge, chunks[1]);
-
-        // Right side: pct + value
-        let pct_str = if i == 0 {
-            format!(" 100% {}", value_strs[i])
+        if i == 0 {
+            // Total: label + value, NO gauge (total is 100% by definition).
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(6),    // label
+                    Constraint::Min(0),       // value
+                ])
+                .split(rows[i]);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{:<6}", labels[i]),
+                    label_style,
+                ))),
+                chunks[0],
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    value_strs[i].clone(),
+                    value_styles[i],
+                ))),
+                chunks[1],
+            );
         } else {
-            format!(" {:>3.0}% {}", r * 100.0, value_strs[i])
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(pct_str, value_styles[i]))),
-            chunks[2],
-        );
+            // Other rows: label + gauge + value, NO percentage label.
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(6),    // label (CacheR is 6 chars)
+                    Constraint::Length(8),    // LineGauge
+                    Constraint::Min(0),       // value
+                ])
+                .split(rows[i]);
+
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{:<6}", labels[i]),
+                    label_style,
+                ))),
+                chunks[0],
+            );
+
+            let gauge = LineGauge::default()
+                .ratio(ratio(values[i]))
+                .filled_style(Style::default().fg(value_colors[i]))
+                .unfilled_style(Style::default().fg(theme.meter_bg))
+                .label("");
+            f.render_widget(gauge, chunks[1]);
+
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    value_strs[i].clone(),
+                    value_styles[i],
+                ))),
+                chunks[2],
+            );
+        }
     }
 }
 
@@ -775,7 +762,19 @@ mod tests {
     #[test]
     fn iphone_mode_quota_section_present() {
         let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        // populate_demo overwrites rate_limits — push mmx after it so the
+        // buckets have both a percentage (for the gauge label) and a reset
+        // timestamp (so the "in X" text appears).
         demo::populate_demo(&mut app);
+        let now = chrono::Utc::now().timestamp() as u64;
+        app.rate_limits.push(crate::model::RateLimitInfo {
+            source: "mmx".to_string(),
+            five_hour_pct: Some(42.0),
+            five_hour_resets_at: Some(now + 2 * 3600 + 13 * 60),
+            seven_day_pct: Some(15.0),
+            seven_day_resets_at: Some(now + 6 * 86400 + 12 * 3600),
+            updated_at: None,
+        });
         let backend = TestBackend::new(46, 35);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -788,7 +787,13 @@ mod tests {
         );
         assert!(text.contains("5h"), "5h bucket\n{text}");
         assert!(text.contains("7d"), "7d bucket\n{text}");
-        assert!(text.contains("%"), "percentage should appear\n{text}");
+        // Quota gauges still show the usage percentage on the bar label.
+        assert!(text.contains("%"), "percentage should appear on quota bar\n{text}");
+        // Reset text uses the "in" prefix from format_reset_time.
+        assert!(
+            text.contains("in "),
+            "reset text should carry the 'in ' prefix\n{text}"
+        );
     }
 
     #[test]
@@ -1024,6 +1029,40 @@ mod tests {
         assert!(
             tokens_panel.contains("1k") || tokens_panel.contains("1000") || tokens_panel.contains("1.0k"),
             "selected session's 1k total must appear in the tokens panel slice:\n{tokens_panel}\n--- full ---\n{text}"
+        );
+    }
+
+    #[test]
+    fn iphone_mode_tokens_gauge_has_no_percentage() {
+        // Tokens gauges must NOT show a percentage label (Total has no gauge
+        // at all; other rows use a bare LineGauge). The quota panel still uses
+        // "%" on its bars, so we scope this check to the tokens slice only.
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        let mut s = make_test_session("p0", 1000, 2000, 3000, 4000);
+        s.project_name = "p0".into();
+        app.sessions.push(s);
+        // Add a quota row so the tokens slice is well-bounded.
+        let now = chrono::Utc::now().timestamp() as u64;
+        app.rate_limits.push(crate::model::RateLimitInfo {
+            source: "mmx".to_string(),
+            five_hour_pct: Some(50.0),
+            five_hour_resets_at: Some(now + 2 * 3600 + 13 * 60),
+            seven_day_pct: Some(30.0),
+            seven_day_resets_at: Some(now + 13 * 86400 + 4 * 3600),
+            updated_at: None,
+        });
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        let tokens_start = text.find("tokens").expect("tokens divider");
+        let chats_start = text.find("chats").expect("chats divider");
+        let tokens_slice = &text[tokens_start..chats_start];
+        assert!(
+            !tokens_slice.contains('%'),
+            "tokens panel should not show percentages on its bars\nslice: {tokens_slice}"
         );
     }
 
