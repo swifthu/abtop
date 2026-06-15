@@ -211,7 +211,7 @@ impl AgentSession {
     }
 
     pub fn elapsed_display(&self) -> String {
-        let secs = self.elapsed().as_secs();
+        let secs = self.elapsed_seconds();
         if secs < 60 {
             format!("{}s", secs)
         } else if secs < 3600 {

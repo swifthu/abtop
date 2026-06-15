@@ -19,6 +19,8 @@ const CHAT_VISIBLE: usize = 5;
 const TASK_TRUNCATE: usize = 38;
 /// Max chars for the project column.
 const PROJECT_TRUNCATE: usize = 8;
+/// Max chars for the model name shown in the session row 1.
+const MODEL_TRUNCATE: usize = 12;
 
 /// Source IDs rendered in the quota section, in display order.
 const QUOTA_SOURCES: &[&str] = &["mmx", "claude"];
@@ -112,7 +114,7 @@ fn draw_meta(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let session_count = app.sessions.len();
     let right = format!(" {}  {}↑ {}● ", now, active, session_count);
 
-    let row1 = Line::from(vec![
+    let mut row1_spans: Vec<Span> = vec![
         Span::styled(
             title,
             Style::default()
@@ -120,10 +122,9 @@ fn draw_meta(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-    ]);
+    ];
 
     // Compute host vitals on the right side of row 1 only when there's space.
-    let mut row1_spans: Vec<Span> = row1.spans.clone();
     let used1: usize = row1_spans
         .iter()
         .map(|s| s.content.chars().count())
@@ -394,7 +395,7 @@ fn draw_session_row1(
         Style::default().fg(ctx_color),
     ));
     spans.push(Span::styled(
-        format!(" {}", truncate_str(&model_short, 12)),
+        format!(" {}", truncate_str(&model_short, MODEL_TRUNCATE)),
         Style::default().fg(theme.graph_text),
     ));
 
@@ -416,14 +417,7 @@ fn draw_session_row2(
     area: Rect,
     theme: &Theme,
 ) {
-    let age = session.elapsed_seconds();
-    let age_str = if age < 60 {
-        format!("{}s", age)
-    } else if age < 3600 {
-        format!("{}m", age / 60)
-    } else {
-        format!("{}h {}m", age / 3600, (age % 3600) / 60)
-    };
+    let age_str = session.elapsed_display();
     let turns_str = if session.turn_count == 1 {
         "1 turn".to_string()
     } else {
@@ -596,8 +590,11 @@ mod tests {
             .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
             .unwrap();
         let text = format!("{}", terminal.backend());
-        assert!(text.contains("mmx"), "mmx quota label\n{text}");
-        assert!(text.contains("cl "), "claude quota label\n{text}");
+        assert!(
+            text.contains("mmx  —") || text.contains("mmx 5h") || text.contains("mmx  5h"),
+            "mmx quota row\n{text}"
+        );
+        assert!(text.contains("cl   5h"), "claude quota row\n{text}");
         assert!(text.contains("5h"), "5h bucket\n{text}");
         assert!(text.contains("7d"), "7d bucket\n{text}");
     }
