@@ -3,6 +3,7 @@ mod context;
 mod footer;
 mod header;
 mod help;
+mod iphone;
 mod mcp;
 mod ports;
 mod projects;
@@ -314,6 +315,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         Block::default().style(Style::default().bg(theme.main_bg).fg(theme.main_fg)),
         area,
     );
+
+    // iPhone mode must come BEFORE too-small: width ≤ 46 is also < MIN_WIDTH (60).
+    if w <= IPHONE_WIDTH && h >= IPHONE_MIN_HEIGHT {
+        iphone::draw_iphone_mode(f, app, area, &app.theme);
+        draw_overlays(f, app, &app.theme);
+        return;
+    }
 
     if w < MIN_WIDTH || h < MIN_HEIGHT {
         // Mode labels stay as English product names (not localized via t()):
@@ -1403,6 +1411,38 @@ mod tests {
         assert!(
             text.contains("desktop mode"),
             "120x10 should hint at desktop mode\n{text}"
+        );
+    }
+
+    #[test]
+    fn iphone_mode_dispatch_renders_for_46x35() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        crate::demo::populate_demo(&mut app);
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            text.contains("iphone mode"),
+            "46x35 should dispatch to iPhone mode\n{text}"
+        );
+        assert!(
+            !text.contains("Terminal too small"),
+            "46x35 should not show too-small prompt\n{text}"
+        );
+    }
+
+    #[test]
+    fn iphone_mode_does_not_trigger_above_46_columns() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        crate::demo::populate_demo(&mut app);
+        let backend = TestBackend::new(47, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            !text.contains("iphone mode"),
+            "47x35 should not dispatch to iPhone mode\n{text}"
         );
     }
 }
