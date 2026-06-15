@@ -7,9 +7,53 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{LineGauge, Paragraph};
 use ratatui::Frame;
 
-use super::quota::format_reset_time;
 use super::sessions::shorten_model;
 use super::{fmt_tokens, grad_at, make_gradient, truncate_str};
+
+/// Format a reset timestamp as a compact "2h 13m" / "13d 4h" / "30s" string.
+/// Max 7 chars (e.g. "13d 4h"). Returns "—" when reset is in the past.
+fn format_time_short(reset_ts: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if reset_ts <= now {
+        return "—".to_string();
+    }
+    let diff = reset_ts - now;
+    if diff < 60 {
+        format!("{}s", diff)
+    } else if diff < 3600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86400 {
+        let h = diff / 3600;
+        let m = (diff % 3600) / 60;
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h {}m", h, m)
+        }
+    } else {
+        let d = diff / 86400;
+        let h = (diff % 86400) / 3600;
+        if h == 0 {
+            format!("{}d", d)
+        } else {
+            format!("{}d {}h", d, h)
+        }
+    }
+}
+
+/// Pick a color based on time remaining until reset. Green = far away,
+/// yellow = getting close, red = imminent.
+fn countdown_color(remaining_secs: Option<u64>, theme: &Theme) -> Color {
+    match remaining_secs {
+        Some(s) if s < 6 * 3600 => theme.status_fg,
+        Some(s) if s < 24 * 3600 => theme.warning_fg,
+        Some(_) => theme.proc_misc,
+        None => theme.inactive_fg,
+    }
+}
 
 /// Maximum number of sessions rendered in the iPhone-mode list.
 const MAX_VISIBLE_SESSIONS: usize = 5;
@@ -226,8 +270,9 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 /// Render one quota bucket row using ratatui's native `LineGauge` widget.
-/// Layout: `5h ` (3) + LineGauge (8) + pct + reset text (rest).
-/// When `pct` is `None`, render a dimmed zero-ratio gauge with `— no data`.
+/// Layout: `5h ` (3) + LineGauge (fills remaining) + " " + time (≤7 chars).
+/// Bar color follows time-until-reset: green (>24h) / yellow (6-24h) /
+/// red (<6h). Percentage is shown inside the gauge label.
 fn quota_bucket_row(
     f: &mut Frame,
     label: &str,
@@ -237,62 +282,63 @@ fn quota_bucket_row(
     area: Rect,
 ) {
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
-    let pct_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
     let reset_style = Style::default().fg(theme.graph_text);
 
-    // Sub-layout: "5h " (3) + gauge (8) + pct% + reset text (rest)
+    // Layout: "5h " (3) + LineGauge (fills) + " " + time (≤7 chars + padding)
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(3),    // "5h "
-            Constraint::Length(8),    // LineGauge
-            Constraint::Min(0),       // pct + reset
+            Constraint::Min(0),       // LineGauge fills remaining
+            Constraint::Length(9),    // " 2h 13m" — space + up to 7 chars
         ])
         .split(area);
 
-    // Label: "5h "
-    let label_span = Span::styled(format!("{label} "), label_style);
-    f.render_widget(Paragraph::new(Line::from(label_span)), chunks[0]);
+    // Label "5h "
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!("{label} "), label_style))),
+        chunks[0],
+    );
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let remaining = reset.map(|ts| ts.saturating_sub(now));
+    let color = countdown_color(remaining, theme);
 
     match pct {
         Some(p) => {
-            let bar_color = if p >= 80.0 {
-                theme.status_fg
-            } else if p >= 60.0 {
-                theme.warning_fg
-            } else {
-                theme.proc_misc
-            };
-            // Native LineGauge: ratio 0.0-1.0
             let ratio = (p / 100.0).clamp(0.0, 1.0);
             let gauge = LineGauge::default()
                 .ratio(ratio)
-                .filled_style(Style::default().fg(bar_color))
+                .filled_style(Style::default().fg(color))
                 .unfilled_style(Style::default().fg(theme.meter_bg))
-                .label("");
+                .label(format!("{:>3.0}%", p));
             f.render_widget(gauge, chunks[1]);
 
-            // Right side: " 36% reset in 2h 13m"
-            let reset_str = reset
-                .map(|ts| format!("{:>3.0}% reset in {}", p, format_reset_time(ts)))
-                .unwrap_or_else(|| format!("{:>3.0}%", p));
+            // Time text: " 2h 13m" (leading space + ≤7 char time)
+            let time_str = reset
+                .map(format_time_short)
+                .unwrap_or_else(|| "—".to_string());
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(reset_str, pct_style))),
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {time_str}"),
+                    reset_style,
+                ))),
                 chunks[2],
             );
         }
         None => {
-            // No data: render the gauge at ratio 0 with dim color
+            // No usage data: dim gauge + N/A time
             let gauge = LineGauge::default()
                 .ratio(0.0)
                 .filled_style(Style::default().fg(theme.inactive_fg))
                 .unfilled_style(Style::default().fg(theme.meter_bg))
-                .label("");
+                .label("—");
             f.render_widget(gauge, chunks[1]);
-
-            let na_str = "  — no data".to_string();
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(na_str, reset_style))),
+                Paragraph::new(Line::from(Span::styled("  —", reset_style))),
                 chunks[2],
             );
         }
@@ -794,6 +840,40 @@ mod tests {
         // the label, so we just confirm the bare labels are present.
         assert!(text.contains("5h"), "5h label\n{text}");
         assert!(text.contains("7d"), "7d label\n{text}");
+    }
+
+    #[test]
+    fn iphone_mode_quota_no_duplicate_in_prefix() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        demo::populate_demo(&mut app);
+        // populate_demo overwrites rate_limits — push mmx after it.
+        let now = chrono::Utc::now().timestamp() as u64;
+        app.rate_limits.push(crate::model::RateLimitInfo {
+            source: "mmx".to_string(),
+            five_hour_pct: Some(50.0),
+            five_hour_resets_at: Some(now + 2 * 3600 + 13 * 60), // 2h 13m
+            seven_day_pct: Some(30.0),
+            seven_day_resets_at: Some(now + 13 * 86400 + 4 * 3600), // 13d 4h
+            updated_at: None,
+        });
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            !text.contains("in in"),
+            "should not duplicate 'in' prefix\n{text}"
+        );
+        assert!(
+            text.contains("2h 13m"),
+            "5h reset time should render\n{text}"
+        );
+        assert!(
+            text.contains("13d 4h"),
+            "7d reset time should render\n{text}"
+        );
     }
 
     #[test]
