@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::model::{ChatMessage, ChatRole, RateLimitInfo, SessionStatus};
+use crate::model::{ChatMessage, ChatRole, SessionStatus};
 use crate::theme::Theme;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -34,14 +34,15 @@ fn quota_label(source: &str) -> &'static str {
 }
 
 /// Compact status icon + short label for a session status.
+/// Format: `<icon><Word>` so the row reads e.g. `●Work`, `◌Wait`, `⚡Rate`, `✓Done`.
 fn status_short(status: &SessionStatus) -> &'static str {
     match status {
-        SessionStatus::Thinking => "◉",
-        SessionStatus::Executing => "●",
-        SessionStatus::Waiting => "◌",
-        SessionStatus::Unknown => "?",
-        SessionStatus::RateLimited => "⏳",
-        SessionStatus::Done => "✓",
+        SessionStatus::Thinking => "◉Work",
+        SessionStatus::Executing => "●Exec",
+        SessionStatus::Waiting => "◌Wait",
+        SessionStatus::Unknown => "?Unk",
+        SessionStatus::RateLimited => "⚡Rate",
+        SessionStatus::Done => "✓Done",
     }
 }
 
@@ -227,84 +228,62 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 /// Render two quota rows: one per source (mmx, claude), each showing
-/// `5h 85% in 2h 13m` and `7d 12% in 5d 4h` (when data is present).
+/// both buckets inline (e.g. `mmx 5h 65% ↻2h  7d 88% ↻3d`).
 fn draw_quota(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let cpu_grad = make_gradient(
-        theme.cpu_grad.start,
-        theme.cpu_grad.mid,
-        theme.cpu_grad.end,
-    );
-
-    // Split into two columns side-by-side: one per source.
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    for (i, source) in QUOTA_SOURCES.iter().enumerate() {
+    let mut lines: Vec<Line> = Vec::new();
+    for source in QUOTA_SOURCES.iter() {
         let rl = app
             .rate_limits
             .iter()
             .find(|r| r.source.eq_ignore_ascii_case(source));
         let label = quota_label(source);
-        let row = quota_row(rl, label, &cpu_grad, theme);
-        f.render_widget(Paragraph::new(Line::from(row)), cols[i]);
-    }
-}
-
-/// One row string in the quota section.
-fn quota_row(
-    rl: Option<&RateLimitInfo>,
-    label: &str,
-    grad: &[Color; 101],
-    theme: &Theme,
-) -> Vec<Span<'static>> {
-    let pct = rl.and_then(|r| r.five_hour_pct).unwrap_or(0.0);
-    let pct7 = rl.and_then(|r| r.seven_day_pct).unwrap_or(0.0);
-    let reset5 = rl
-        .and_then(|r| r.five_hour_resets_at)
-        .map(format_reset_time)
-        .unwrap_or_default();
-    let reset7 = rl
-        .and_then(|r| r.seven_day_resets_at)
-        .map(format_reset_time)
-        .unwrap_or_default();
-
-    vec![
-        Span::styled(
-            format!(" {} ", label),
+        let mut spans: Vec<Span> = vec![Span::styled(
+            format!("{} ", label),
             Style::default()
                 .fg(theme.title)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("5h ", Style::default().fg(theme.graph_text)),
-        Span::styled(
-            format!("{:>2.0}%", pct),
-            Style::default().fg(grad_at(grad, pct)),
-        ),
-        Span::styled(" 7d ", Style::default().fg(theme.graph_text)),
-        Span::styled(
-            format!("{:>2.0}%", pct7),
-            Style::default().fg(grad_at(grad, pct7)),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            if reset5.is_empty() {
-                "—".to_string()
-            } else {
-                reset5
-            },
-            Style::default().fg(theme.graph_text),
-        ),
-        Span::styled(
-            if reset7.is_empty() {
-                " ".to_string()
-            } else {
-                format!(" {}", reset7)
-            },
-            Style::default().fg(theme.graph_text),
-        ),
-    ]
+        )];
+        match rl {
+            Some(rl) => {
+                for (bucket_label, pct, reset) in [
+                    ("5h", &rl.five_hour_pct, &rl.five_hour_resets_at),
+                    ("7d", &rl.seven_day_pct, &rl.seven_day_resets_at),
+                ] {
+                    let pct_str = match pct {
+                        Some(p) => format!("{:>3.0}%", p),
+                        None => "  —  ".to_string(),
+                    };
+                    let reset_str = match (reset, pct) {
+                        (Some(ts), Some(_)) => format!("↻{}", format_reset_time(*ts)),
+                        _ => String::new(),
+                    };
+                    let color = match pct {
+                        Some(p) if *p >= 80.0 => Color::Red,
+                        Some(p) if *p >= 60.0 => Color::Yellow,
+                        Some(_) => Color::Green,
+                        None => theme.inactive_fg,
+                    };
+                    spans.push(Span::styled(
+                        format!(" {bucket_label} "),
+                        Style::default().fg(theme.graph_text),
+                    ));
+                    spans.push(Span::styled(pct_str, Style::default().fg(color)));
+                    spans.push(Span::styled(
+                        format!(" {reset_str}"),
+                        Style::default().fg(theme.graph_text),
+                    ));
+                }
+            }
+            None => {
+                spans.push(Span::styled(
+                    " —  — ",
+                    Style::default().fg(theme.inactive_fg),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Session list: each session takes 3 rows (status header / stats / task).
