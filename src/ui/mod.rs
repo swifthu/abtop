@@ -281,6 +281,8 @@ pub(crate) fn styled_label(text: &str, graph_text: Color) -> Span<'static> {
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 pub(crate) const DESKTOP_WIDTH: u16 = 100;
+pub(crate) const IPHONE_WIDTH: u16 = 46;       // iPhone mode trigger threshold
+pub(crate) const IPHONE_MIN_HEIGHT: u16 = 18;  // iPhone mode minimum height
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClickTarget {
@@ -314,6 +316,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     );
 
     if w < MIN_WIDTH || h < MIN_HEIGHT {
+        let (target_w, target_h, target_label) = if w <= IPHONE_WIDTH {
+            (IPHONE_WIDTH, IPHONE_MIN_HEIGHT, "iphone mode")
+        } else if w < DESKTOP_WIDTH {
+            (MIN_WIDTH, MIN_HEIGHT, "narrow mode")
+        } else {
+            (DESKTOP_WIDTH, MIN_HEIGHT, "desktop mode")
+        };
         let msg = vec![
             Line::from(Span::styled(
                 t("term.too_small"),
@@ -356,11 +365,12 @@ pub fn draw(f: &mut Frame, app: &App) {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{} {}  {} {}",
+                    "{} {}  {} {} ({})",
                     t("term.width"),
-                    MIN_WIDTH,
+                    target_w,
                     t("term.height"),
-                    MIN_HEIGHT
+                    target_h,
+                    target_label
                 ),
                 Style::default().fg(theme.main_fg),
             )),
@@ -1350,5 +1360,31 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn too_small_promotes_iphone_mode_when_width_below_46() {
+        let app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        let backend = TestBackend::new(40, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            text.contains("iphone mode"),
+            "40x15 should hint at iPhone mode\n{text}"
+        );
+    }
+
+    #[test]
+    fn too_small_promotes_narrow_mode_when_width_between_47_and_59() {
+        let app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        let backend = TestBackend::new(55, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            text.contains("narrow mode"),
+            "55x15 should hint at narrow mode\n{text}"
+        );
     }
 }
