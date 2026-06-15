@@ -19,7 +19,7 @@ const TASK_TRUNCATE: usize = 38;
 /// prefix and the 2-cell indent.
 const SUMMARY_TRUNCATE: usize = 35;
 /// Max chars for the project column.
-const PROJECT_TRUNCATE: usize = 12;
+const PROJECT_TRUNCATE: usize = 26;
 /// Max chars for the model name shown in the session row 1.
 const MODEL_TRUNCATE: usize = 12;
 /// Width of each tokens-panel bar (label-relative, in cells). The desktop
@@ -509,10 +509,19 @@ fn draw_session_row2(
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Row 3: stats + task collapsed into one right-aligned line.
-/// Format: `└─ <task> · 47m · 24 turns · 1.2M tok`, truncated to fit and
-/// flushed to the right edge of the row. When the task is empty, render
-/// `(idle) · <stats>` instead.
+/// Row 3: task on the left, compact stats on the right, separated by a
+/// flex gap. The left segment keeps its original `└─ <task>` look pinned
+/// to the left edge; the stats segment is pinned to the right edge; the
+/// middle fills with whitespace.
+///
+/// Format: `└─ <task>          47m · T`
+/// (or `└─ (idle)            47m · T` when the task is empty).
+///
+/// Stats are trimmed to the absolute minimum: token count is dropped and
+/// `turns` is shortened to `T` (e.g. `12T`). The two segments share a
+/// row but the flex gap between them makes it obvious which piece is
+/// the task and which is the stats — without `·` connector collapsing
+/// them into one logical string.
 fn draw_session_row3(
     f: &mut Frame,
     session: &crate::model::AgentSession,
@@ -520,29 +529,52 @@ fn draw_session_row3(
     theme: &Theme,
 ) {
     let age_str = session.elapsed_display();
-    let turns_str = if session.turn_count == 1 {
-        "1 turn".to_string()
-    } else {
-        format!("{} turns", session.turn_count)
-    };
-    let stats = format!("{} · {} · {} tok", age_str, turns_str, fmt_tokens(session.total_tokens()));
+    // Compact stats: keep tokens, drop the "tok" unit; shorten "turns"
+    // to "T". Final form: `<age>·<N>T·1.2M` — the `·` separators touch
+    // their neighbors (no spaces) to save horizontal cells on a 46-col
+    // screen.
+    let stats = format!(
+        "{}·{}T·{}",
+        age_str,
+        session.turn_count,
+        fmt_tokens(session.total_tokens())
+    );
+
     let task = session
         .current_tasks
         .last()
         .map(|s| s.as_str())
         .unwrap_or("");
-    let body = if task.is_empty() {
-        format!("(idle) · {}", stats)
+    let left_body = if task.is_empty() {
+        "(idle)".to_string()
     } else {
-        format!("{} · {}", truncate_str(task, TASK_TRUNCATE), stats)
+        truncate_str(task, TASK_TRUNCATE).to_string()
     };
+    // 2-cell leading gap + "└─ " (3) + task body. The leading gap is
+    // baked into the rendered string so the visible `└─` sits exactly
+    // 2 cells from the row's left edge — matching the row 1 / row 2
+    // indent.
+    let left_rendered = format!("  └─ {left_body}");
+    let left_w = left_rendered.chars().count().min(area.width as usize) as u16;
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_w),
+            Constraint::Min(0),
+            Constraint::Length(stats.chars().count() as u16),
+        ])
+        .split(area);
+
+    let dim = Style::default().fg(theme.graph_text);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("└─ {body}"),
-            Style::default().fg(theme.graph_text),
-        )))
-        .alignment(Alignment::Right),
-        area,
+        Paragraph::new(Line::from(Span::styled(left_rendered, dim))),
+        cols[0],
+    );
+    f.render_widget(Paragraph::new(Line::from("")), cols[1]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(stats, dim))),
+        cols[2],
     );
 }
 
@@ -808,12 +840,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .iter()
         .map(|m| chat_line(m, theme))
         .collect();
-    // Bottom-pin: when the chat panel is taller than the message tail (because
-    // sessions < 7 left extra rows), pad with empty lines above so the most
-    // recent message sits at the bottom of the panel.
+    // Top-pin: when the chat panel is taller than the message tail (because
+    // sessions < 5 left extra rows), pad with empty lines below so the
+    // most recent message sits at the top of the panel, just under the
+    // chat divider.
     let pad = h.saturating_sub(take);
     for _ in 0..pad {
-        lines.insert(0, Line::from(""));
+        lines.push(Line::from(""));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
@@ -1050,8 +1083,16 @@ mod tests {
                 || text.contains("Unk"),
             "status label\n{text}"
         );
-        assert!(text.contains("turns"), "stats row\n{text}");
+        // Row 2 carries the session summary.
+        assert!(text.contains("Summary:"), "summary row\n{text}");
+        // Row 3 is `└─ <task>` on the left and compact stats on the right
+        // (turns shortened to `T`, tokens dropped). At least one session
+        // should expose the `· NT` pattern.
         assert!(text.contains("└─"), "task row\n{text}");
+        assert!(
+            text.contains("T") && text.contains("·"),
+            "compact stats row should contain `·` separator and `T` turn marker\n{text}"
+        );
     }
 
     #[test]
@@ -1398,9 +1439,10 @@ mod tests {
     }
 
     #[test]
-    fn iphone_mode_chat_messages_bottom_pinned() {
+    fn iphone_mode_chat_messages_top_pinned() {
         // With 1 message and an expanded chat area, the message should appear
-        // at the bottom of the chat panel, not the top.
+        // at the top of the chat panel (just under the chat divider), not
+        // at the bottom.
         let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
         app.sessions.push(crate::model::AgentSession {
             agent_cli: "claude",
@@ -1436,7 +1478,7 @@ mod tests {
             first_assistant_text: String::new(),
             chat_messages: vec![crate::model::ChatMessage {
                 role: crate::model::ChatRole::User,
-                text: "BOTTOM_ANCHOR".into(),
+                text: "TOP_ANCHOR".into(),
             }],
             tool_calls: Vec::new(),
             pending_since_ms: 0,
@@ -1451,22 +1493,20 @@ mod tests {
             .unwrap();
         let text = format!("{}", terminal.backend());
         let chat_div = line_of(&text, "chats");
-        let footer_div = line_of(&text, "────");
-        let anchor = line_of(&text, "BOTTOM_ANCHOR");
+        let anchor = line_of(&text, "TOP_ANCHOR");
         assert!(chat_div > 0, "chat divider must render\n{text}");
         assert!(anchor > chat_div, "message below chat divider\n{text}");
-        // Footer divider is the second occurrence of `────` (first is between
-        // quota and sessions). Find last one to locate chat panel end.
         let last_dashes = last_line_of(&text, "────");
         assert!(last_dashes > 0, "footer divider must render\n{text}");
-        // With 1 session, chat panel is large; the single message should sit
-        // closer to the footer divider than to the chat divider (bottom-pinned).
+        // With 1 session, chat panel is large; the single message should
+        // sit closer to the chat divider than to the footer divider
+        // (top-pinned, whitespace trails below).
         let chat_h = last_dashes - chat_div - 1;
         let dist_from_top = anchor - chat_div - 1;
         let dist_from_bottom = chat_h - dist_from_top;
         assert!(
-            dist_from_bottom < dist_from_top,
-            "message should be bottom-pinned: \
+            dist_from_top < dist_from_bottom,
+            "message should be top-pinned: \
              chat_h={chat_h}, dist_from_top={dist_from_top}, dist_from_bottom={dist_from_bottom}\n{text}"
         );
     }
