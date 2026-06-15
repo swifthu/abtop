@@ -48,9 +48,9 @@ fn status_short(status: &SessionStatus) -> &'static str {
     }
 }
 
-/// Entry point for iPhone (46-column) compact mode.
+/// Entry point for iPhone (sub-60-column) compact mode.
 ///
-/// Triggered by `src/ui/mod.rs::draw` when `width <= IPHONE_WIDTH` and
+/// Triggered by `src/ui/mod.rs::draw` when `width < MIN_WIDTH` and
 /// `height >= IPHONE_MIN_HEIGHT`. Renders a single-page integrated layout:
 /// meta + quota + sessions (max 7 × 3 rows) + selected session chat (5)
 /// + footer keybinds, separated by ── named dividers.
@@ -259,9 +259,9 @@ fn draw_quota(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                         _ => String::new(),
                     };
                     let color = match pct {
-                        Some(p) if *p >= 80.0 => Color::Red,
-                        Some(p) if *p >= 60.0 => Color::Yellow,
-                        Some(_) => Color::Green,
+                        Some(p) if *p >= 80.0 => theme.status_fg,
+                        Some(p) if *p >= 60.0 => theme.warning_fg,
+                        Some(_) => theme.proc_misc,
                         None => theme.inactive_fg,
                     };
                     spans.push(Span::styled(
@@ -389,10 +389,13 @@ fn draw_session_row1(
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
     }
-    spans.push(Span::styled(status.to_string(), Style::default().fg(status_color)));
+    spans.push(Span::styled(
+        status.to_string(),
+        Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+    ));
     spans.push(Span::styled(
         format!(" {:>3.0}%", session.context_percent),
-        Style::default().fg(ctx_color),
+        Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
         format!(" {}", truncate_str(&model_short, MODEL_TRUNCATE)),
@@ -453,7 +456,7 @@ fn draw_session_row3(
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!("  {}", body),
-            Style::default().fg(theme.inactive_fg),
+            Style::default().fg(theme.graph_text),
         ))),
         area,
     );

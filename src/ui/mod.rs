@@ -282,7 +282,6 @@ pub(crate) fn styled_label(text: &str, graph_text: Color) -> Span<'static> {
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 pub(crate) const DESKTOP_WIDTH: u16 = 100;
-pub(crate) const IPHONE_WIDTH: u16 = 46;       // iPhone mode trigger threshold
 pub(crate) const IPHONE_MIN_HEIGHT: u16 = 18;  // iPhone mode minimum height
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -316,8 +315,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         area,
     );
 
-    // iPhone mode must come BEFORE too-small: width ≤ 46 is also < MIN_WIDTH (60).
-    if w <= IPHONE_WIDTH && h >= IPHONE_MIN_HEIGHT {
+    // iPhone mode covers all sub-narrow widths (< MIN_WIDTH = 60).
+    // This catches terminals as narrow as 18 cols (the absolute floor) up to 59.
+    if w < MIN_WIDTH && h >= IPHONE_MIN_HEIGHT {
         iphone::draw_iphone_mode(f, app, area, &app.theme);
         draw_overlays(f, app, &app.theme);
         return;
@@ -329,11 +329,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         // parallel to how "Claude" / "Codex" / "OpenCode" appear untranslated in
         // agent labels. Translating them would require a separate locale key per
         // mode name and add no value.
-        let (target_w, target_h, target_label) = if w <= IPHONE_WIDTH {
-            (IPHONE_WIDTH, IPHONE_MIN_HEIGHT, "iphone mode")
+        let (target_w, target_h, target_label) = if w < MIN_WIDTH {
+            // iPhone mode covers any w < 60; needs h >= 18.
+            (MIN_WIDTH, IPHONE_MIN_HEIGHT, "iphone mode")
         } else if w < DESKTOP_WIDTH {
+            // 60..DESKTOP_WIDTH: narrow mode.
             (MIN_WIDTH, MIN_HEIGHT, "narrow mode")
         } else {
+            // >= DESKTOP_WIDTH: desktop mode.
             (DESKTOP_WIDTH, MIN_HEIGHT, "desktop mode")
         };
         let msg = vec![
@@ -1376,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn too_small_promotes_iphone_mode_when_width_below_46() {
+    fn too_small_promotes_iphone_mode_when_width_below_60_and_height_below_18() {
         let app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
         let backend = TestBackend::new(40, 15);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1389,15 +1392,31 @@ mod tests {
     }
 
     #[test]
-    fn too_small_promotes_narrow_mode_when_width_between_47_and_59() {
+    fn too_small_promotes_iphone_mode_when_width_between_47_and_59() {
+        // 47..60 now routes to iPhone mode (not narrow mode) when h >= 18.
+        // For h < 18, the too-small prompt recommends iphone mode too.
         let app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
         let backend = TestBackend::new(55, 15);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let text = format!("{}", terminal.backend());
         assert!(
+            text.contains("iphone mode"),
+            "55x15 (w<60, h<18) should hint at iPhone mode\n{text}"
+        );
+    }
+
+    #[test]
+    fn too_small_promotes_narrow_mode_when_width_between_60_and_99_and_height_below_18() {
+        // w >= 60 and w < DESKTOP_WIDTH now recommends narrow mode.
+        let app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        let backend = TestBackend::new(75, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
             text.contains("narrow mode"),
-            "55x15 should hint at narrow mode\n{text}"
+            "75x15 (60<=w<100, h<18) should hint at narrow mode\n{text}"
         );
     }
 
@@ -1437,7 +1456,8 @@ mod tests {
     }
 
     #[test]
-    fn iphone_mode_does_not_trigger_above_46_columns() {
+    fn iphone_mode_triggers_at_47_columns() {
+        // 47..60 now also dispatches to iPhone mode (was narrow before).
         let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
         crate::demo::populate_demo(&mut app);
         let backend = TestBackend::new(47, 35);
@@ -1445,8 +1465,38 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let text = format!("{}", terminal.backend());
         assert!(
-            !text.contains("iphone mode"),
-            "47x35 should not dispatch to iPhone mode\n{text}"
+            text.contains("abtop v"),
+            "47x35 should dispatch to iPhone mode\n{text}"
+        );
+        assert!(
+            text.contains("quota"),
+            "47x35 should render iPhone quota section\n{text}"
+        );
+    }
+
+    #[test]
+    fn iphone_mode_does_not_trigger_at_60_columns() {
+        // 60 cols is the boundary: iPhone mode is for w < 60; at 60 we go to narrow.
+        // iPhone mode renders a unique single-column panel with quota + sessions
+        // stacked; narrow mode renders the multi-panel TUI with tabs.
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        crate::demo::populate_demo(&mut app);
+        let backend = TestBackend::new(60, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            !text.contains("Terminal too small"),
+            "60x35 should not show too-small prompt\n{text}"
+        );
+        // Narrow mode shows tab markers; iPhone mode does not.
+        assert!(
+            text.contains("Work(w)") && text.contains("Usage(u)"),
+            "60x35 should dispatch to narrow mode (with tabs)\n{text}"
+        );
+        assert!(
+            !text.contains(" quota "),
+            "60x35 should NOT render iPhone-style ' quota ' divider\n{text}"
         );
     }
 }
