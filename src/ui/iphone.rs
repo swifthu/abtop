@@ -15,6 +15,9 @@ use super::{braille_graph_multirow, fmt_tokens, grad_at, make_gradient, truncate
 const MAX_VISIBLE_SESSIONS: usize = 5;
 /// Max chars for the rendered task text (`└─ ...`).
 const TASK_TRUNCATE: usize = 38;
+/// Max chars for the session summary text (row 2), after the `Summary: `
+/// prefix and the 2-cell indent.
+const SUMMARY_TRUNCATE: usize = 35;
 /// Max chars for the project column.
 const PROJECT_TRUNCATE: usize = 12;
 /// Max chars for the model name shown in the session row 1.
@@ -369,7 +372,7 @@ fn draw_sessions(f: &mut Frame, app: &App, area: Rect, theme: &Theme, max_visibl
         let row_block = &chunks[(i as u16 * 3) as usize..(i as u16 * 3 + 3) as usize];
 
         draw_session_row1(f, app, session, row_block[0], theme, &proc_grad, session_idx);
-        draw_session_row2(f, session, row_block[1], theme);
+        draw_session_row2(f, app, session, row_block[1], theme);
         draw_session_row3(f, session, row_block[2], theme);
     }
 }
@@ -473,7 +476,44 @@ fn draw_session_row1(
 }
 
 /// Row 2: `  47m · 24 turns · 1.2M tok`
+/// Row 2: `  Summary: <truncated summary>`.
+/// The summary text comes from `App::session_summary` (which already
+/// resolves the summary cache, pending-dots animation, and falls back
+/// to `initial_prompt` / `first_assistant_text`). We only truncate the
+/// rendered string and color it like the other dim helper rows.
 fn draw_session_row2(
+    f: &mut Frame,
+    app: &App,
+    session: &crate::model::AgentSession,
+    area: Rect,
+    theme: &Theme,
+) {
+    let summary = app.session_summary(session);
+    let prefix = format!("  {}: ", crate::locale::t("col.summary"));
+    let prefix_w = prefix.chars().count();
+    let content = truncate_str(&summary, SUMMARY_TRUNCATE);
+    let width = area.width as usize;
+    // Pad to right edge so the summary looks anchored at the start of the
+    // row, with the dim helper color extending to the column end.
+    let pad = width.saturating_sub(prefix_w + content.chars().count());
+    let mut spans: Vec<Span> = vec![
+        Span::styled(prefix, Style::default().fg(theme.graph_text)),
+        Span::styled(content, Style::default().fg(theme.main_fg)),
+    ];
+    if pad > 0 {
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().fg(theme.graph_text),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Row 3: stats + task collapsed into one right-aligned line.
+/// Format: `└─ <task> · 47m · 24 turns · 1.2M tok`, truncated to fit and
+/// flushed to the right edge of the row. When the task is empty, render
+/// `(idle) · <stats>` instead.
+fn draw_session_row3(
     f: &mut Frame,
     session: &crate::model::AgentSession,
     area: Rect,
@@ -485,38 +525,23 @@ fn draw_session_row2(
     } else {
         format!("{} turns", session.turn_count)
     };
-    let text = format!("  {} · {} · {} tok", age_str, turns_str, fmt_tokens(session.total_tokens()));
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            text,
-            Style::default().fg(theme.graph_text),
-        ))),
-        area,
-    );
-}
-
-/// Row 3: `  └─ Edit src/pay.rs`
-fn draw_session_row3(
-    f: &mut Frame,
-    session: &crate::model::AgentSession,
-    area: Rect,
-    theme: &Theme,
-) {
+    let stats = format!("{} · {} · {} tok", age_str, turns_str, fmt_tokens(session.total_tokens()));
     let task = session
         .current_tasks
         .last()
         .map(|s| s.as_str())
         .unwrap_or("");
     let body = if task.is_empty() {
-        "(idle)".to_string()
+        format!("(idle) · {}", stats)
     } else {
-        format!("└─ {}", truncate_str(task, TASK_TRUNCATE))
+        format!("{} · {}", truncate_str(task, TASK_TRUNCATE), stats)
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!("  {}", body),
+            format!("└─ {body}"),
             Style::default().fg(theme.graph_text),
-        ))),
+        )))
+        .alignment(Alignment::Right),
         area,
     );
 }
