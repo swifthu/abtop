@@ -22,19 +22,6 @@ const PROJECT_TRUNCATE: usize = 12;
 /// Max chars for the model name shown in the session row 1.
 const MODEL_TRUNCATE: usize = 12;
 
-/// Source IDs rendered in the quota section, in display order.
-const QUOTA_SOURCES: &[&str] = &["mmx", "claude"];
-
-/// Display label for a quota source ID.
-/// "mmx" stays as the CLI/internal ID; "claude" is abbreviated to "cl".
-fn quota_label(source: &str) -> &'static str {
-    match source {
-        "mmx" => "mmx",
-        "claude" => "cl ",
-        _ => "??",
-    }
-}
-
 /// Short plain-text status label (e.g. "Think", "Wait"). No icon prefix —
 /// visual signal comes from color + the context row 3 task line.
 pub(crate) fn status_short(status: &SessionStatus) -> &'static str {
@@ -99,7 +86,7 @@ pub(crate) fn draw_iphone_mode(f: &mut Frame, app: &App, area: Rect, theme: &The
         .split(area);
 
     draw_meta(f, app, chunks[0], theme);
-    draw_divider(f, chunks[1], theme, "quota", theme.cpu_box);
+    draw_divider(f, chunks[1], theme, "mmx · quota", theme.cpu_box);
     draw_quota(f, app, chunks[2], theme);
     draw_divider(f, chunks[3], theme, "sessions", theme.proc_box);
     draw_sessions(f, app, chunks[4], theme, actual_visible);
@@ -238,63 +225,77 @@ fn draw_chat_divider(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     draw_divider(f, area, theme, &label, theme.proc_box);
 }
 
-/// Render two quota rows: one per source (mmx, claude), each showing
-/// both buckets inline (e.g. `mmx 5h 65% ↻2h  7d 88% ↻3d`).
-fn draw_quota(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let mut lines: Vec<Line> = Vec::new();
-    for source in QUOTA_SOURCES.iter() {
-        let rl = app
-            .rate_limits
-            .iter()
-            .find(|r| r.source.eq_ignore_ascii_case(source));
-        let label = quota_label(source);
-        let mut spans: Vec<Span> = vec![Span::styled(
-            format!("{} ", label),
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD),
-        )];
-        match rl {
-            Some(rl) => {
-                for (bucket_label, pct, reset) in [
-                    ("5h", &rl.five_hour_pct, &rl.five_hour_resets_at),
-                    ("7d", &rl.seven_day_pct, &rl.seven_day_resets_at),
-                ] {
-                    let pct_str = match pct {
-                        Some(p) => format!("{:>3.0}%", p),
-                        None => "  —  ".to_string(),
-                    };
-                    let reset_str = match (reset, pct) {
-                        (Some(ts), Some(_)) => format!("↻{}", format_reset_time(*ts)),
-                        _ => String::new(),
-                    };
-                    let color = match pct {
-                        Some(p) if *p >= 80.0 => theme.status_fg,
-                        Some(p) if *p >= 60.0 => theme.warning_fg,
-                        Some(_) => theme.proc_misc,
-                        None => theme.inactive_fg,
-                    };
-                    spans.push(Span::styled(
-                        format!(" {bucket_label} "),
-                        Style::default().fg(theme.graph_text),
-                    ));
-                    spans.push(Span::styled(pct_str, Style::default().fg(color)));
-                    spans.push(Span::styled(
-                        format!(" {reset_str}"),
-                        Style::default().fg(theme.graph_text),
-                    ));
-                }
-            }
-            None => {
-                spans.push(Span::styled(
-                    " —  — ",
-                    Style::default().fg(theme.inactive_fg),
-                ));
-            }
+/// Render one quota bucket row, e.g. `5h ████░░░░ 36% reset in 2h 13m`.
+/// When `pct` is `None`, render a dimmed placeholder: `5h  ──────  —  no data`.
+fn quota_bucket_row(
+    label: &str,
+    pct: Option<f64>,
+    reset: Option<u64>,
+    theme: &Theme,
+) -> Line<'static> {
+    let label_style = Style::default()
+        .fg(theme.title)
+        .add_modifier(Modifier::BOLD);
+    let reset_style = Style::default().fg(theme.graph_text);
+
+    match pct {
+        Some(p) => {
+            let bar_color = if p >= 80.0 {
+                theme.status_fg
+            } else if p >= 60.0 {
+                theme.warning_fg
+            } else {
+                theme.proc_misc
+            };
+            // 6-char progress bar: filled ████░░░░
+            let bar_w: usize = 6;
+            let filled = ((p / 100.0) * bar_w as f64).round() as usize;
+            let filled = filled.min(bar_w);
+            let empty = bar_w - filled;
+            let bar_str = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+            let pct_str = format!("{:>3.0}%", p);
+            let reset_str = reset
+                .map(|ts| format!(" reset in {}", format_reset_time(ts)))
+                .unwrap_or_default();
+            Line::from(vec![
+                Span::styled(format!("{:<3}", label), label_style),
+                Span::styled(" ", Style::default()),
+                Span::styled(bar_str, Style::default().fg(bar_color)),
+                Span::styled(" ", Style::default()),
+                Span::styled(pct_str, label_style),
+                Span::styled(reset_str, reset_style),
+            ])
         }
-        lines.push(Line::from(spans));
+        None => Line::from(vec![
+            Span::styled(format!("{:<3}", label), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled("──────", Style::default().fg(theme.inactive_fg)),
+            Span::styled(" ", Style::default()),
+            Span::styled("  — ", Style::default().fg(theme.inactive_fg)),
+            Span::styled(" no data", reset_style),
+        ]),
     }
-    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Render two quota rows for the mmx source (5h and 7d).
+fn draw_quota(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    let mmx = app
+        .rate_limits
+        .iter()
+        .find(|r| r.source.eq_ignore_ascii_case("mmx"));
+    let row_5h = quota_bucket_row(
+        "5h",
+        mmx.and_then(|r| r.five_hour_pct),
+        mmx.and_then(|r| r.five_hour_resets_at),
+        theme,
+    );
+    let row_7d = quota_bucket_row(
+        "7d",
+        mmx.and_then(|r| r.seven_day_pct),
+        mmx.and_then(|r| r.seven_day_resets_at),
+        theme,
+    );
+    f.render_widget(Paragraph::new(vec![row_5h, row_7d]), area);
 }
 
 /// Session list: each session takes 3 rows (status header / stats / task).
@@ -475,20 +476,36 @@ fn draw_session_row3(
     );
 }
 
-/// Render the 5-row aggregated tokens panel (Total / In / Out / CacheR / CacheW).
-/// Sums each bucket across all sessions for an at-a-glance view of context use.
+/// Render the 5-row tokens panel (Total / In / Out / CacheR / CacheW)
+/// for the currently selected session. Falls back to a placeholder when
+/// no session is selected.
 fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let total_in: u64 = app.sessions.iter().map(|s| s.total_input_tokens).sum();
-    let total_out: u64 = app.sessions.iter().map(|s| s.total_output_tokens).sum();
-    let total_cache_r: u64 = app.sessions.iter().map(|s| s.total_cache_read).sum();
-    let total_cache_w: u64 = app.sessions.iter().map(|s| s.total_cache_create).sum();
+    let session = match app.sessions.get(app.selected) {
+        Some(s) => s,
+        None => {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " (no session) ",
+                    Style::default().fg(theme.inactive_fg),
+                ))),
+                area,
+            );
+            return;
+        }
+    };
+    let total_in = session.total_input_tokens;
+    let total_out = session.total_output_tokens;
+    let total_cache_r = session.total_cache_read;
+    let total_cache_w = session.total_cache_create;
     let total_all = total_in + total_out + total_cache_r + total_cache_w;
 
-    let label_style = Style::default().fg(theme.graph_text);
-    let total_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
-    let cache_w_style = Style::default().fg(theme.proc_misc);
-    let cache_r_style = Style::default().fg(theme.session_id);
+    let label_style = Style::default().fg(theme.title);
+    let total_style = Style::default()
+        .fg(theme.title)
+        .add_modifier(Modifier::BOLD);
     let main_style = Style::default().fg(theme.main_fg);
+    let cache_r_style = Style::default().fg(theme.session_id);
+    let cache_w_style = Style::default().fg(theme.proc_misc);
 
     let label_w = "CacheR".chars().count(); // 6, the longest label
     let lines = vec![
@@ -663,12 +680,32 @@ mod tests {
             .unwrap();
         let text = format!("{}", terminal.backend());
         assert!(
-            text.contains("mmx  —") || text.contains("mmx 5h") || text.contains("mmx  5h"),
-            "mmx quota row\n{text}"
+            text.contains("mmx · quota"),
+            "mmx · quota divider\n{text}"
         );
-        assert!(text.contains("cl   5h"), "claude quota row\n{text}");
+        assert!(
+            text.contains("█") || text.contains("░") || text.contains("──────"),
+            "progress bar characters (█ / ░ when data present, or ────── when no data) should appear\n{text}"
+        );
         assert!(text.contains("5h"), "5h bucket\n{text}");
         assert!(text.contains("7d"), "7d bucket\n{text}");
+    }
+
+    #[test]
+    fn iphone_mode_quota_bucket_labels_plain_text() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        demo::populate_demo(&mut app);
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        // The 5h / 7d bucket labels render as bare plain text (no icon prefix
+        // such as ↻ or ⤴). The reset countdown is the only text adjacent to
+        // the label, so we just confirm the bare labels are present.
+        assert!(text.contains("5h"), "5h label\n{text}");
+        assert!(text.contains("7d"), "7d label\n{text}");
     }
 
     #[test]
@@ -707,7 +744,7 @@ mod tests {
             .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
             .unwrap();
         let text = format!("{}", terminal.backend());
-        assert!(text.contains(" quota "), "quota divider\n{text}");
+        assert!(text.contains("mmx · quota"), "mmx · quota divider\n{text}");
         assert!(text.contains(" sessions "), "sessions divider\n{text}");
         assert!(text.contains(" tokens "), "tokens divider\n{text}");
         assert!(text.contains("chats"), "chat divider\n{text}");
@@ -729,6 +766,97 @@ mod tests {
         assert!(text.contains("Out"), "Out label\n{text}");
         assert!(text.contains("CacheR"), "CacheR label\n{text}");
         assert!(text.contains("CacheW"), "CacheW label\n{text}");
+    }
+
+    /// Helper: build a minimal AgentSession with the given token counts and
+    /// a project name so session rows are distinguishable in the buffer.
+    fn make_test_session(
+        name: &str,
+        input: u64,
+        output: u64,
+        cache_r: u64,
+        cache_w: u64,
+    ) -> crate::model::AgentSession {
+        crate::model::AgentSession {
+            agent_cli: "claude",
+            pid: 0,
+            session_id: String::new(),
+            cwd: "/tmp".into(),
+            project_name: name.into(),
+            started_at: 0,
+            status: crate::model::SessionStatus::Waiting,
+            model: "claude-sonnet-4-6".into(),
+            effort: String::new(),
+            context_percent: 0.0,
+            total_input_tokens: input,
+            total_output_tokens: output,
+            total_cache_read: cache_r,
+            total_cache_create: cache_w,
+            turn_count: 1,
+            current_tasks: vec![],
+            mem_mb: 0,
+            version: String::new(),
+            git_branch: String::new(),
+            git_added: 0,
+            git_modified: 0,
+            token_history: Vec::new(),
+            context_history: Vec::new(),
+            compaction_count: 0,
+            context_window: 0,
+            subagents: Vec::new(),
+            mem_file_count: 0,
+            mem_line_count: 0,
+            children: Vec::new(),
+            initial_prompt: String::new(),
+            first_assistant_text: String::new(),
+            chat_messages: Vec::new(),
+            tool_calls: Vec::new(),
+            pending_since_ms: 0,
+            thinking_since_ms: 0,
+            file_accesses: Vec::new(),
+            config_root: String::new(),
+        }
+    }
+
+    #[test]
+    fn iphone_mode_tokens_use_selected_session_only() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        // Two sessions with very different token counts.
+        let s0 = make_test_session("p0", 100, 200, 300, 400); // total = 1000
+        let s1 = make_test_session("p1", 10_000_000, 0, 0, 0); // total = 10M
+        app.sessions.push(s0);
+        app.sessions.push(s1);
+        app.selected = 0; // select the first session (small tokens)
+
+        let backend = TestBackend::new(46, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_iphone_mode(f, &app, f.area(), &app.theme))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        assert!(
+            text.contains("1.0k") || text.contains("1000") || text.contains("1k"),
+            "selected session's small token total should appear\n{text}"
+        );
+        // The second session's 10M tokens DO appear in its row 2 ("10M tok"),
+        // so we can't simply assert !contains("10M"). Instead, scope the
+        // assertion to the tokens panel — between the " tokens " divider and
+        // the chat divider. In that slice, the only token count visible
+        // should be the selected session's totals (1k / 100 / 200 / 300 / 400).
+        let tokens_panel_start = text.find(" tokens ").expect("tokens divider");
+        let tokens_panel_end = text[tokens_panel_start..]
+            .find("chats")
+            .map(|i| tokens_panel_start + i)
+            .expect("chat divider after tokens panel");
+        let tokens_panel = &text[tokens_panel_start..tokens_panel_end];
+        assert!(
+            !tokens_panel.contains("10M") && !tokens_panel.contains("10.0M"),
+            "second session's 10M tokens must NOT appear in the tokens panel slice:\n{tokens_panel}\n--- full ---\n{text}"
+        );
+        assert!(
+            tokens_panel.contains("1k") || tokens_panel.contains("1000") || tokens_panel.contains("1.0k"),
+            "selected session's 1k total must appear in the tokens panel slice:\n{tokens_panel}\n--- full ---\n{text}"
+        );
     }
 
     #[test]
