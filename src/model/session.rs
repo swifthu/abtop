@@ -221,6 +221,23 @@ impl AgentSession {
         }
     }
 
+    /// Compact elapsed for narrow layouts: rounds to whole hours once the
+    /// session has been running ≥1h (`1h29m → 1h`, `1h31m → 2h`); below
+    /// 1h it shows whole minutes (`47m`). Sub-minute values fall through
+    /// to the seconds form so the cell never collapses to empty.
+    pub fn elapsed_compact(&self) -> String {
+        let secs = self.elapsed_seconds();
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else {
+            // Round to nearest hour.
+            let hours = ((secs + 1800) / 3600).max(1);
+            format!("{hours}h")
+        }
+    }
+
     /// Elapsed seconds since the session started (saturating).
     pub fn elapsed_seconds(&self) -> u64 {
         self.elapsed().as_secs()

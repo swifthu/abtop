@@ -26,6 +26,10 @@ const MODEL_TRUNCATE: usize = 12;
 /// panel renders at variable width; on iPhone we pin it so the right-hand
 /// "Token Rate / graph / Total" column has predictable space.
 const TOKENS_BAR_W: u16 = 11;
+/// Fixed width of the right-hand stats column on session row 3
+/// (`<age>/<N>T/<1.2M>`). The left column gets whatever cells remain
+/// after this column plus a 1-cell flex gap.
+const STATS_COL_W: usize = 18;
 
 /// Localized status label with the same icon prefix used on the desktop
 /// session panel (e.g. "● Think", "◌ Wait", "✓ Done"). The icon is part
@@ -143,8 +147,10 @@ fn draw_meta(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let mut lines: Vec<Line> = vec![Line::from(row1_spans)];
 
-    // Row 2: CPU / MEM / load or "loading…"
-    let row2_spans: Vec<Span> = if let Some(host) = &app.host_metrics {
+    // Row 2: CPU / GPU / MEM (from the lightweight Mach-trap probe +
+    // macmon) or "loading…" while the first real sample is being
+    // established.
+    let mut row2_spans: Vec<Span> = if let Some(host) = app.host_snapshot {
         vec![
             Span::styled(" cpu ", Style::default().fg(theme.graph_text)),
             Span::styled(
@@ -154,16 +160,6 @@ fn draw_meta(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                     host.cpu_pct,
                 )),
             ),
-            Span::styled("  mem ", Style::default().fg(theme.graph_text)),
-            Span::styled(
-                format!("{:>2.0}%", host.mem_pct),
-                Style::default().fg(theme.main_fg),
-            ),
-            Span::styled("  load ", Style::default().fg(theme.graph_text)),
-            Span::styled(
-                format!("{:.1}", host.load1),
-                Style::default().fg(theme.main_fg),
-            ),
         ]
     } else {
         vec![Span::styled(
@@ -171,6 +167,41 @@ fn draw_meta(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             Style::default().fg(theme.inactive_fg),
         )]
     };
+    // GPU share (Apple Silicon). Sourced from `macmon pipe`; absent
+    // when macmon is not installed or has not yet produced a sample.
+    if let Some(host) = app.host_snapshot {
+        if let Some(pct) = host.gpu_pct {
+            row2_spans.push(Span::styled(
+                "  gpu ",
+                Style::default().fg(theme.graph_text),
+            ));
+            row2_spans.push(Span::styled(
+                format!("{:>2.0}%", pct),
+                Style::default().fg(theme.main_fg),
+            ));
+        }
+        // MEM (always shown when we have a snapshot).
+        row2_spans.push(Span::styled(
+            "  mem ",
+            Style::default().fg(theme.graph_text),
+        ));
+        row2_spans.push(Span::styled(
+            format!("{:>2.0}%", host.mem_pct),
+            Style::default().fg(theme.main_fg),
+        ));
+        // Apple Silicon full-system power. Absent when macmon is not
+        // installed or has not yet produced a sample.
+        if let Some(watts) = host.all_power_w {
+            row2_spans.push(Span::styled(
+                "  power ",
+                Style::default().fg(theme.graph_text),
+            ));
+            row2_spans.push(Span::styled(
+                format!("{:.1}W", watts),
+                Style::default().fg(theme.main_fg),
+            ));
+        }
+    }
     lines.push(Line::from(row2_spans));
 
     f.render_widget(Paragraph::new(lines), area);
@@ -512,29 +543,27 @@ fn draw_session_row2(
 /// Row 3: task on the left, compact stats on the right, separated by a
 /// flex gap. The left segment keeps its original `└─ <task>` look pinned
 /// to the left edge; the stats segment is pinned to the right edge; the
-/// middle fills with whitespace.
+/// Row 3: task on the left (truncated with `…` if it doesn't fit),
+/// compact stats on the right (pinned to a fixed-width column so the
+/// stats never get squeezed out by a long task).
 ///
-/// Format: `└─ <task>          47m · T`
-/// (or `└─ (idle)            47m · T` when the task is empty).
-///
-/// Stats are trimmed to the absolute minimum: token count is dropped and
-/// `turns` is shortened to `T` (e.g. `12T`). The two segments share a
-/// row but the flex gap between them makes it obvious which piece is
-/// the task and which is the stats — without `·` connector collapsing
-/// them into one logical string.
+/// Layout: a horizontal split into three columns.
+/// - Left column gets the available space minus 18 cells. The task body
+///   is truncated to fit with `truncate_str` (which adds `…` if the
+///   string would otherwise overflow).
+/// - Middle column fills the remaining gap with whitespace.
+/// - Right column is exactly `STATS_COL_W` cells wide and contains
+///   `<age>/<N>T/<1.2M>`, where `<age>` uses the compact form
+///   (whole hours, rounded; whole minutes below 1h).
 fn draw_session_row3(
     f: &mut Frame,
     session: &crate::model::AgentSession,
     area: Rect,
     theme: &Theme,
 ) {
-    let age_str = session.elapsed_display();
-    // Compact stats: keep tokens, drop the "tok" unit; shorten "turns"
-    // to "T". Final form: `<age>·<N>T·1.2M` — the `·` separators touch
-    // their neighbors (no spaces) to save horizontal cells on a 46-col
-    // screen.
+    let age_str = session.elapsed_compact();
     let stats = format!(
-        "{}·{}T·{}",
+        "{}/{}T/{}",
         age_str,
         session.turn_count,
         fmt_tokens(session.total_tokens())
@@ -548,21 +577,30 @@ fn draw_session_row3(
     let left_body = if task.is_empty() {
         "(idle)".to_string()
     } else {
-        truncate_str(task, TASK_TRUNCATE).to_string()
+        task.to_string()
     };
-    // 2-cell leading gap + "└─ " (3) + task body. The leading gap is
-    // baked into the rendered string so the visible `└─` sits exactly
-    // 2 cells from the row's left edge — matching the row 1 / row 2
-    // indent.
-    let left_rendered = format!("  └─ {left_body}");
-    let left_w = left_rendered.chars().count().min(area.width as usize) as u16;
+
+    let width = area.width as usize;
+    // 2-cell leading gap + "└─ " (3) prefix + task body (truncated to
+    // fit) on the left; flex gap in the middle; fixed-width stats on
+    // the right.
+    let prefix = "  └─ ";
+    let left_max = width
+        .saturating_sub(STATS_COL_W + 1) // 1 = flex gap
+        .saturating_sub(prefix.chars().count());
+    let truncated_body = truncate_str(&left_body, left_max);
+    let left_rendered = format!("{prefix}{truncated_body}");
+    let left_w = left_rendered
+        .chars()
+        .count()
+        .min(width.saturating_sub(STATS_COL_W)) as u16;
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(left_w),
             Constraint::Min(0),
-            Constraint::Length(stats.chars().count() as u16),
+            Constraint::Length(STATS_COL_W as u16),
         ])
         .split(area);
 
@@ -572,8 +610,12 @@ fn draw_session_row3(
         cols[0],
     );
     f.render_widget(Paragraph::new(Line::from("")), cols[1]);
+    // Right-align the stats within the fixed-width column so the text
+    // always flushes to the right edge of the row, regardless of the
+    // exact char count of `stats`.
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(stats, dim))),
+        Paragraph::new(Line::from(Span::styled(stats, dim)))
+            .alignment(Alignment::Right),
         cols[2],
     );
 }

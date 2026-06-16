@@ -1499,4 +1499,25 @@ mod tests {
             "60x35 should NOT render iPhone-style ' quota ' divider\n{text}"
         );
     }
+
+    #[test]
+    fn desktop_120x40_smoke_render() {
+        // Regression smoke test: a wide terminal should drive the desktop
+        // path, not the iPhone path. The desktop panel set has its own
+        // title/label vocabulary; we just assert the iPhone-specific
+        // dividers do not appear and that header/host panels still render.
+        let text = render_demo(120, 40);
+        assert!(text.contains("abtop v"), "header must render\n{text}");
+        assert!(text.contains("CPU"), "host CPU panel must render\n{text}");
+        assert!(text.contains("MEM"), "host MEM panel must render\n{text}");
+        // iPhone-only dividers must not appear at desktop sizes.
+        assert!(
+            !text.contains(" mmx · quota "),
+            "120x40 should NOT render iPhone-style 'mmx · quota' divider\n{text}"
+        );
+        assert!(
+            !text.contains(" tokens "),
+            "120x40 should NOT render iPhone-style 'tokens' divider\n{text}"
+        );
+    }
 }

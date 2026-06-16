@@ -56,6 +56,7 @@ pub mod collector;
 pub mod config;
 pub mod demo;
 pub mod host_info;
+pub mod host_probe;
 pub mod locale;
 pub mod model;
 pub mod setup;

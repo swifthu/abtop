@@ -1,5 +1,6 @@
 use crate::collector::{read_rate_limits, McpServer, MultiCollector};
 use crate::host_info::{AgentAggregate, HostMetrics, HostSampler};
+use crate::host_probe::{HostProbe, HostSnapshot};
 use crate::model::{AgentSession, OrphanPort, RateLimitInfo, SessionStatus};
 use crate::theme::Theme;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -146,6 +147,14 @@ pub struct App {
     host_sampler: HostSampler,
     /// Latest host metrics snapshot (None until first valid sample).
     pub host_metrics: Option<HostMetrics>,
+    /// Low-overhead Mach-trap probe (macOS only) used by the iPhone meta
+    /// row. `None` on non-macOS or until the first real sample lands.
+    host_probe: HostProbe,
+    /// Most recent `HostProbe` snapshot — read by the iPhone meta row so
+    /// `draw_iphone_mode` (which takes `&App`) can render without taking
+    /// a `&mut` to the probe state. `None` while the baseline is being
+    /// established or on non-macOS targets.
+    pub host_snapshot: Option<HostSnapshot>,
     /// Aggregate metrics across all sessions (recomputed each tick).
     pub agent_aggregate: AgentAggregate,
     /// Help overlay (`?`) visibility.
@@ -216,6 +225,8 @@ impl App {
             show_file_audit: false,
             host_sampler: HostSampler::new(),
             host_metrics: None,
+            host_probe: HostProbe::new(),
+            host_snapshot: None,
             agent_aggregate: AgentAggregate::default(),
             help_open: false,
             view_open: false,
@@ -515,6 +526,13 @@ impl App {
         self.orphan_ports = self.collector.orphan_ports.clone();
         self.mcp_servers = self.collector.mcp_servers.clone();
         self.host_metrics = self.host_sampler.sample();
+        // Tick the lightweight Mach-trap probe used by the iPhone meta
+        // row. The probe internally rate-limits to 1 Hz, so calling it
+        // every 2s tick is cheap (most calls return None with no
+        // kernel work).
+        if let Some(snap) = self.host_probe.tick() {
+            self.host_snapshot = Some(snap);
+        }
         self.agent_aggregate = AgentAggregate::from_sessions(&self.sessions);
         if self.selected >= self.sessions.len() && !self.sessions.is_empty() {
             self.selected = self.sessions.len() - 1;
