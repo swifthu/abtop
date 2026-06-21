@@ -985,16 +985,25 @@ fn draw_file_audit(f: &mut Frame, session: &AgentSession, area: Rect, theme: &Th
 }
 
 pub(crate) fn shorten_model(model: &str, is_1m: bool) -> String {
-    // "claude-opus-4-6" → "opus4.6", "claude-sonnet-4-6" → "sonnet4.6", "claude-haiku-4-5" → "haiku4.5"
-    let s = model.strip_prefix("claude-").unwrap_or(model);
-    let s = s.trim_end_matches("[1m]");
-    // Extract name and version: "opus-4-6" → ("opus", "4.6")
-    let base = if let Some(pos) = s.find(|c: char| c.is_ascii_digit()) {
-        let name = s[..pos].trim_end_matches('-');
-        let ver = s[pos..].replace('-', ".");
-        format!("{}{}", name, ver)
+    // "MiniMax-M2.7-Highspeed" → "M2.7-hs" (8 chars)
+    // "claude-opus-4-6" → "opus4.6"
+    let s = model.trim_end_matches("[1m]");
+    let base = if s.starts_with("MiniMax-") {
+        // MiniMax-M2.7-Highspeed → M2.7-hs
+        let rest = &s[8..]; // skip "MiniMax-"
+        rest.split('-')
+            .map(|p| if p.eq_ignore_ascii_case("highspeed") { "hs" } else { p })
+            .collect::<Vec<_>>()
+            .join("-")
     } else {
-        s.to_string()
+        let stripped = s.strip_prefix("claude-").unwrap_or(s);
+        if let Some(pos) = stripped.find(|c: char| c.is_ascii_digit()) {
+            let name = stripped[..pos].trim_end_matches('-');
+            let ver = stripped[pos..].replace('-', ".");
+            format!("{}{}", name, ver)
+        } else {
+            stripped.to_string()
+        }
     };
     if is_1m {
         format!("{}[1m]", base)

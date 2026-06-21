@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use super::quota::format_reset_time;
 use super::sessions::shorten_model;
-use super::{braille_graph_multirow, fmt_tokens, grad_at, make_gradient, truncate_str};
+use super::{braille_graph_multirow, fmt_tokens, grad_at, make_gradient, remaining_bar, truncate_str};
 
 /// Maximum number of sessions rendered in the iPhone-mode list.
 const MAX_VISIBLE_SESSIONS: usize = 5;
@@ -21,7 +21,7 @@ const SUMMARY_TRUNCATE: usize = 35;
 /// Max chars for the project column.
 const PROJECT_TRUNCATE: usize = 26;
 /// Max chars for the model name shown in the session row 1.
-const MODEL_TRUNCATE: usize = 12;
+const MODEL_TRUNCATE: usize = 8;
 /// Width of each tokens-panel bar (label-relative, in cells). The desktop
 /// panel renders at variable width; on iPhone we pin it so the right-hand
 /// "Token Rate / graph / Total" column has predictable space.
@@ -279,15 +279,24 @@ fn quota_bucket_row(
     theme: &Theme,
     area: Rect,
 ) {
+    // Bucket length in seconds, used to grade the time text by its own
+    // remaining share. 5h = 18_000, 7d = 604_800.
+    let bucket_secs: u64 = match label {
+        "5h" => 5 * 3600,
+        "7d" => 7 * 24 * 3600,
+        _ => 5 * 3600,
+    };
     let label_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
     let reset_style = Style::default().fg(theme.graph_text);
 
-    // Layout: "5h " (3) + LineGauge (fills) + " " + time (" in 2h 13m", 9 chars)
+    // Layout: "5h " (3) + ■ bar+pct (fills remaining) + " in 2h 13m" (11 chars)
+    // Bar and percentage live in the same chunk so the bar can shrink
+    // gracefully on narrow screens instead of squeezing the % out.
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(3),    // "5h "
-            Constraint::Min(0),       // LineGauge fills remaining
+            Constraint::Min(0),       // ■ bar + pct fills remaining
             Constraint::Length(11),   // " in 6d 12h" — leading space + 9 char time
         ])
         .split(area);
@@ -298,47 +307,85 @@ fn quota_bucket_row(
         chunks[0],
     );
 
+    // Build a CPU-style gradient (same one used by the desktop quota panel
+    // and the iPhone session percent bar) so colors stay consistent
+    // across the app.
+    let cpu_grad = make_gradient(
+        theme.cpu_grad.start,
+        theme.cpu_grad.mid,
+        theme.cpu_grad.end,
+    );
+
     match pct {
         Some(used) => {
             // Convert "used" share to "remaining" share. The bar's length and
             // color both describe how much is left, not how much is spent.
             let left = (100.0 - used).clamp(0.0, 100.0);
-            let color = if left < 20.0 {
-                theme.status_fg
-            } else if left < 40.0 {
-                theme.warning_fg
-            } else {
-                theme.proc_misc
-            };
-            let ratio = (left / 100.0).clamp(0.0, 1.0);
-            let gauge = LineGauge::default()
-                .ratio(ratio)
-                .filled_style(Style::default().fg(color))
-                .unfilled_style(Style::default().fg(theme.meter_bg))
-                .label(format!("{:>3.0}%", left));
-            f.render_widget(gauge, chunks[1]);
+            // Reserve 5 chars for " 80%" so the % is always visible
+            let pct_w = 5usize;
+            let bar_w = (chunks[1].width as usize).saturating_sub(pct_w + 1);
+            let mut bar_spans = remaining_bar(left, bar_w, &cpu_grad, theme.meter_bg);
+            let mut with_lead: Vec<Span<'static>> = Vec::with_capacity(bar_spans.len() + 3);
+            with_lead.push(Span::raw(" "));
+            with_lead.append(&mut bar_spans);
+            let c = grad_at(&cpu_grad, used);
+            with_lead.push(Span::styled(
+                format!(" {:>3.0}%", left),
+                Style::default().fg(c),
+            ));
+            f.render_widget(Paragraph::new(Line::from(with_lead)), chunks[1]);
 
-            // Time text: " in 2h 13m" (leading space + format_reset_time)
+            // Time text: "in 2h 13m" (format_reset_time includes "in" prefix)
+            // "in" stays dim (graph_text). Numeric duration is colored by
+            // its own remaining share of the bucket: green > 40%, yellow
+            // 20–40%, red < 20% — so the urgency scales with how soon the
+            // reset lands, independent of the bar's percentage.
             let time_str = reset
                 .map(format_reset_time)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "in —".to_string());
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {time_str}"),
-                    reset_style,
-                ))),
-                chunks[2],
-            );
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let remaining_secs = reset
+                .map(|ts| ts.saturating_sub(now_secs))
+                .unwrap_or(0);
+            let time_pct = if bucket_secs > 0 {
+                ((remaining_secs as f64 / bucket_secs as f64) * 100.0).clamp(0.0, 100.0)
+            } else {
+                100.0
+            };
+            let time_color = if time_pct < 20.0 {
+                theme.status_fg
+            } else if time_pct < 40.0 {
+                theme.warning_fg
+            } else {
+                theme.proc_misc
+            };
+            let time_style = Style::default().fg(time_color);
+            let mut spans: Vec<Span> = Vec::new();
+            spans.push(Span::raw(" "));
+            if let Some((prefix, num)) = time_str.split_once(' ') {
+                spans.push(Span::styled(prefix.to_string(), reset_style));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(num.to_string(), time_style));
+            } else {
+                spans.push(Span::styled(time_str.clone(), reset_style));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), chunks[2]);
         }
         None => {
-            // No usage data: dim gauge + N/A time
-            let gauge = LineGauge::default()
-                .ratio(0.0)
-                .filled_style(Style::default().fg(theme.inactive_fg))
-                .unfilled_style(Style::default().fg(theme.meter_bg))
-                .label("—");
-            f.render_widget(gauge, chunks[1]);
+            // No usage data: dim bar + N/A time
+            let pct_w = 5usize;
+            let bar_w = (chunks[1].width as usize).saturating_sub(pct_w + 1);
+            let mut bar_spans: Vec<Span<'static>> = Vec::new();
+            bar_spans.push(Span::raw(" "));
+            for _ in 0..bar_w {
+                bar_spans.push(Span::styled("■", Style::default().fg(theme.meter_bg)));
+            }
+            bar_spans.push(Span::styled("   — ", Style::default().fg(theme.inactive_fg)));
+            f.render_widget(Paragraph::new(Line::from(bar_spans)), chunks[1]);
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(" in —", reset_style))),
                 chunks[2],
@@ -397,12 +444,22 @@ fn draw_sessions(f: &mut Frame, app: &App, area: Rect, theme: &Theme, max_visibl
         .constraints(constraints)
         .split(area);
 
+    // Calculate max model name width across all visible sessions
+    let model_max_len = visible.iter()
+        .map(|&i| {
+            let session = &app.sessions[i];
+            let is_1m = session.context_window >= 1_000_000 || session.model.contains("[1m]");
+            shorten_model(&session.model, is_1m).chars().count()
+        })
+        .max()
+        .unwrap_or(MODEL_TRUNCATE);
+
     for i in 0..blocks {
         let session_idx = visible[i];
         let session = &app.sessions[session_idx];
         let row_block = &chunks[(i as u16 * 3) as usize..(i as u16 * 3 + 3) as usize];
 
-        draw_session_row1(f, app, session, row_block[0], theme, &proc_grad, session_idx);
+        draw_session_row1(f, app, session, row_block[0], theme, &proc_grad, session_idx, model_max_len);
         draw_session_row2(f, app, session, row_block[1], theme);
         draw_session_row3(f, session, row_block[2], theme);
     }
@@ -417,6 +474,7 @@ fn draw_session_row1(
     theme: &Theme,
     grad: &[Color; 101],
     session_idx: usize,
+    model_max_len: usize,
 ) {
     let selected = session_idx == app.selected;
     let marker = if selected { "►" } else { " " };
@@ -477,8 +535,9 @@ fn draw_session_row1(
         }),
     ));
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum::<usize>();
-    let right_text = format!("{} {}% {}", status, session.context_percent as i64, model_short);
-    let pad = width.saturating_sub(used + right_text.chars().count() + 1);
+    let model_trunc = truncate_str(&model_short, MODEL_TRUNCATE);
+    let right_text = format!("{}{:>3.0}% {:>width$}", status, session.context_percent, model_trunc, width = model_max_len);
+    let pad = width.saturating_sub(used + right_text.chars().count());
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
     }
@@ -487,7 +546,7 @@ fn draw_session_row1(
         Style::default().fg(status_color).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
-        format!(" {:>3.0}%", session.context_percent),
+        format!("{:>3.0}%", session.context_percent),
         Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
@@ -691,6 +750,13 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     ];
     let value_strs: Vec<String> = values.iter().map(|v| fmt_tokens(*v)).collect();
 
+    // Gradient used by all token bars (matches desktop quota panel)
+    let cpu_grad = make_gradient(
+        theme.cpu_grad.start,
+        theme.cpu_grad.mid,
+        theme.cpu_grad.end,
+    );
+
     for i in 0..5 {
         let row = rows[i];
         // 6 label + 1 gap + TOKENS_BAR_W bar + 1 gap + value + 1 gap = 20
@@ -750,12 +816,21 @@ fn draw_tokens(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 ))),
                 lchunks[0],
             );
-            let gauge = LineGauge::default()
-                .ratio(ratio(values[i]))
-                .filled_style(Style::default().fg(value_colors[i]))
-                .unfilled_style(Style::default().fg(theme.meter_bg))
-                .label("");
-            f.render_widget(gauge, lchunks[2]);
+            let bar_pct = ratio(values[i]) * 100.0;
+            // Filled portion uses the row's own color (matches the value
+            // text on the right). Unfilled portion stays in the theme's
+            // meter_bg — same as the original LineGauge behavior.
+            let bar_w = TOKENS_BAR_W as usize;
+            let filled = ((bar_pct / 100.0) * bar_w as f64).round() as usize;
+            let mut bar_spans: Vec<Span<'static>> = Vec::with_capacity(bar_w);
+            for j in 0..bar_w {
+                if j < filled {
+                    bar_spans.push(Span::styled("■", Style::default().fg(value_colors[i])));
+                } else {
+                    bar_spans.push(Span::styled("■", Style::default().fg(theme.meter_bg)));
+                }
+            }
+            f.render_widget(Paragraph::new(Line::from(bar_spans)), lchunks[2]);
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     value_strs[i].clone(),
