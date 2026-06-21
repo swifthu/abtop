@@ -139,6 +139,24 @@ language = "zh"
 
 When `language` is unset, abtop auto-detects from `LANG` — any value starting with `zh` switches to Simplified Chinese, otherwise English.
 
+## iPhone / Compact Mode
+
+When the terminal width is below 60 columns, abtop automatically switches to a single-page iPhone-style layout that fits narrow screens (e.g. iPhone with Termux, split tmux panes, small SSH windows). Heights ≥ 18 rows are supported.
+
+The compact view packs everything onto one screen:
+
+- **Meta row** — CPU/GPU/power, top status bar
+- **mmx · quota** — 5h and 7d buckets, each with a native `■` bar and a reset countdown (`in 2h 13m`). The bar color follows the `used` share via the CPU gradient; the numeric duration in the countdown is independently graded by its own remaining share of the bucket, so the urgency scales with how soon the reset lands.
+- **sessions** — up to 5 sessions, each rendered as a 3-row block:
+  - Row 1: `►CC <project>      ●<status>  <pct>% <model>` — status, context % and shortened model name are right-aligned, with the gap between project name and the status cluster auto-filled.
+  - Row 2: `Summary: …` — auto-generated session summary
+  - Row 3: `└─ <task>           <age>/<N>T/<tokens>` — current task and compact stats
+- **tokens** — per-session token usage (total, in, out, cache) with native `■` bars in the same color scheme as the desktop panel.
+- **chat** — last few messages from the selected session, bottom-pinned
+- **footer** — compact keybind hints
+
+Model names are auto-shortened to keep the right edge aligned: `MiniMax-M2.7-Highspeed` becomes `M2.7-hs`, `claude-opus-4-6` becomes `opus4.6`, `claude-sonnet-4-6[1m]` becomes `sonnet4.6[1m]`. The right-alignment width is computed from the longest shortened name currently visible, so the model-name column stays aligned as sessions come and go.
+
 ## Key Bindings
 
 | Key                | Action                               |
